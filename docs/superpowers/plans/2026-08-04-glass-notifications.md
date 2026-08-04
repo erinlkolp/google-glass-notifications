@@ -1704,7 +1704,7 @@ item, so an arriving notification does not yank what they are reading."
 
 **Interfaces:**
 - Consumes: `Snapshot`, `SnapshotCodec`, `Protocol` from `:wire`.
-- Produces: `SnapshotStore(File cacheFile)`; `current():Snapshot` (never null — returns an empty snapshot before anything arrives); `apply(Snapshot):void`; `lastUpdatedElapsedMs():long`; `markContact():void`; `isStale(long nowElapsedMs):boolean`; `load():void`; `SnapshotStore.STALE_AFTER_MS:long`; static `SnapshotStore.isStale(long lastContactElapsedMs, long nowElapsedMs):boolean`. `PeerPin(SharedPreferences prefs)`; `isAllowed(String address):boolean`; `pinIfUnset(String address):void`; `pinnedAddress():String`; `clear():void`.
+- Produces: `SnapshotStore(File cacheFile)`; `current():Snapshot` (never null — returns an empty snapshot before anything arrives); `items():List<NotificationItem>`; `apply(Snapshot):void`; `markContact():void`; `isStale():boolean` (instance, reads the clock); `load():void`; `SnapshotStore.STALE_AFTER_MS:long`; `SnapshotStore.NEVER:long`; static `SnapshotStore.isStale(long lastContactElapsedMs, long nowElapsedMs):boolean` (the pure rule, which is what the tests exercise). `PeerPin(SharedPreferences prefs)`; `isAllowed(String address):boolean`; `pinIfUnset(String address):void`; `pinnedAddress():String`; `clear():void`.
 
 - [ ] **Step 1: Write the failing test**
 
