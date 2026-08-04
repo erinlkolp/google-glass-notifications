@@ -1,0 +1,22 @@
+# Review package: 8f11b37e3db7e6d50fdd100ba9024cbf69fcbd43..5c23207
+
+## Commits
+5c23207 build: suppress AGP's Java 8 source/target deprecation warning
+
+## Files changed
+ gradle.properties | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+## Diff
+diff --git a/gradle.properties b/gradle.properties
+index d5e1a4c..40ba792 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -1,3 +1,7 @@
+ org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+ android.useAndroidX=false
++# Java 8 source/target is deliberate and load-bearing: the Glass device runs
++# API 22, which caps us there. JDK 21's warning about compiling for source/
++# target 8 is noise about a decision that is not going to change.
++android.javaCompile.suppressSourceTargetDeprecationWarning=true
+ org.gradle.parallel=true

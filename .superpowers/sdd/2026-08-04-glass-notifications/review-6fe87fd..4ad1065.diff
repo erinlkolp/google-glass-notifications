@@ -1,0 +1,221 @@
+# Review package: 6fe87fd5707cef90149fe872cc49d38c88d2ec8b..4ad1065
+
+## Commits
+4ad1065 fix(glass): plug lifecycle gaps in the RFCOMM server and fake feed
+
+## Files changed
+ .../glassnotify/glass/DebugInjectReceiver.java     |  2 +-
+ .../erinlkolp/glassnotify/glass/GlassNotify.java   | 14 +++++++++++++
+ .../glassnotify/glass/LinkServerService.java       | 23 ++++++++++++++++++----
+ 3 files changed, 34 insertions(+), 5 deletions(-)
+
+## Diff
+diff --git a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/DebugInjectReceiver.java b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/DebugInjectReceiver.java
+index a203f67..46b91b3 100644
+--- a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/DebugInjectReceiver.java
++++ b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/DebugInjectReceiver.java
+@@ -75,21 +75,21 @@ public final class DebugInjectReceiver extends BroadcastReceiver {
+ 
+         Snapshot next = new Snapshot(sequence, items);
+         store.apply(next);
+         Log.i(TAG, "debug: injected " + tier + " item, queue now " + items.size());
+ 
+         notifyUi(context, previous, next);
+     }
+ 
+     /** Runs the same interrupt path the real link service uses. */
+     private void notifyUi(final Context context, final Snapshot previous, final Snapshot next) {
+-        final InterruptOverlay overlay = new InterruptOverlay(context);
++        final InterruptOverlay overlay = GlassNotify.overlay(context);
+         new Handler(Looper.getMainLooper()).post(new Runnable() {
+             @Override
+             public void run() {
+                 NotificationItem interrupt = InterruptPolicy.selectInterrupt(previous, next);
+                 if (interrupt != null) {
+                     overlay.show(interrupt);
+                 }
+             }
+         });
+     }
+diff --git a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/GlassNotify.java b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/GlassNotify.java
+index bdd252e..bd7886a 100644
+--- a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/GlassNotify.java
++++ b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/GlassNotify.java
+@@ -10,20 +10,21 @@ import java.io.File;
+  * snapshot, and Glass is small enough that a holder like this beats wiring a
+  * binder interface between two components in the same process.
+  */
+ public final class GlassNotify {
+ 
+     private static final String PREFS = "glassnotify";
+     private static final String CACHE_FILE = "snapshot.bin";
+ 
+     private static SnapshotStore store;
+     private static PeerPin peerPin;
++    private static InterruptOverlay overlay;
+ 
+     private GlassNotify() {
+     }
+ 
+     public static synchronized SnapshotStore store(Context context) {
+         if (store == null) {
+             Context app = context.getApplicationContext();
+             store = new SnapshotStore(new File(app.getFilesDir(), CACHE_FILE));
+             store.load();
+         }
+@@ -31,11 +32,24 @@ public final class GlassNotify {
+     }
+ 
+     public static synchronized PeerPin peerPin(Context context) {
+         if (peerPin == null) {
+             SharedPreferences prefs = context.getApplicationContext()
+                     .getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+             peerPin = new PeerPin(prefs);
+         }
+         return peerPin;
+     }
++
++    /**
++     * One overlay for the whole process, so a second interrupt arriving while
++     * the first is still showing replaces it and restarts the timer instead of
++     * stacking a second window. Shared by the link service and the debug
++     * receiver alike.
++     */
++    public static synchronized InterruptOverlay overlay(Context context) {
++        if (overlay == null) {
++            overlay = new InterruptOverlay(context.getApplicationContext());
++        }
++        return overlay;
++    }
+ }
+diff --git a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java
+index 6d6f3d5..66ef3b8 100644
+--- a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java
++++ b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java
+@@ -31,36 +31,47 @@ import dev.erinlkolp.glassnotify.wire.SnapshotCodec;
+  * Glass is the server because reconnection means an indefinite backoff loop,
+  * which belongs on the device with the larger battery. Blocking in accept()
+  * costs nothing here. Spec section 5.
+  */
+ public final class LinkServerService extends Service {
+ 
+     private static final String TAG = "GlassNotify";
+ 
+     private volatile boolean running;
+     private Thread acceptThread;
+-    private BluetoothServerSocket serverSocket;
++    private volatile BluetoothServerSocket serverSocket;
++
++    /**
++     * The socket of the connection currently being served, for the whole time
++     * serve() is running; null otherwise. Closing it from onDestroy() is what
++     * unblocks a FrameCodec.read() the accept thread is blocked in - the
++     * listening serverSocket is already closed and gone by the time a
++     * connection is being served, so it cannot do that job. Volatile because
++     * it is written on the accept thread and read from the main thread with
++     * no other happens-before edge between them.
++     */
++    private volatile BluetoothSocket connectedSocket;
+ 
+     private final Handler main = new Handler(Looper.getMainLooper());
+     private InterruptOverlay overlay;
+ 
+     /** The last snapshot applied on this connection; null until one arrives. */
+     private Snapshot lastApplied;
+ 
+     public static void start(Context context) {
+         context.startService(new Intent(context, LinkServerService.class));
+     }
+ 
+     @Override
+     public void onCreate() {
+         super.onCreate();
+-        overlay = new InterruptOverlay(this);
++        overlay = GlassNotify.overlay(this);
+         GlassNotify.store(this);
+     }
+ 
+     @Override
+     public int onStartCommand(Intent intent, int flags, int startId) {
+         if (!running) {
+             running = true;
+             acceptThread = new Thread(new Runnable() {
+                 @Override
+                 public void run() {
+@@ -70,20 +81,21 @@ public final class LinkServerService extends Service {
+             acceptThread.start();
+         }
+         // Restart if the system kills us: this service is the whole point of the app.
+         return START_STICKY;
+     }
+ 
+     @Override
+     public void onDestroy() {
+         running = false;
+         closeServerSocket();
++        closeConnectedSocket();
+         super.onDestroy();
+         main.post(new Runnable() {
+             @Override
+             public void run() {
+                 overlay.dismiss();
+             }
+         });
+     }
+ 
+     @Override
+@@ -106,27 +118,28 @@ public final class LinkServerService extends Service {
+             } catch (IOException e) {
+                 Log.w(TAG, "could not open server socket", e);
+                 sleepQuietly(5_000L);
+                 continue;
+             }
+ 
+             BluetoothSocket socket = null;
+             try {
+                 socket = serverSocket.accept();
+                 closeServerSocket();
++                connectedSocket = socket;
+                 serve(socket);
+             } catch (IOException e) {
+                 if (running) {
+                     Log.w(TAG, "accept failed", e);
+                 }
+             } finally {
+-                closeQuietly(socket);
++                closeConnectedSocket();
+                 closeServerSocket();
+             }
+         }
+     }
+ 
+     private void serve(BluetoothSocket socket) {
+         BluetoothDevice remote = socket.getRemoteDevice();
+         String address = remote == null ? null : remote.getAddress();
+ 
+         PeerPin pin = GlassNotify.peerPin(this);
+@@ -213,21 +226,23 @@ public final class LinkServerService extends Service {
+         BluetoothServerSocket socket = serverSocket;
+         serverSocket = null;
+         if (socket != null) {
+             try {
+                 socket.close();
+             } catch (IOException ignored) {
+             }
+         }
+     }
+ 
+-    private static void closeQuietly(BluetoothSocket socket) {
++    private void closeConnectedSocket() {
++        BluetoothSocket socket = connectedSocket;
++        connectedSocket = null;
+         if (socket != null) {
+             try {
+                 socket.close();
+             } catch (IOException ignored) {
+             }
+         }
+     }
+ 
+     private static void sleepQuietly(long ms) {
+         try {

@@ -1,0 +1,1592 @@
+# Review package: fc13b963679fd6bb12faba6102cce123f5be8dbf..a623441
+
+## Commits
+a623441 refactor(phone): name the pending-snapshot reset for what it does
+b30cdbc test(glass): pin the ratio-based swipe dominance rule
+d096a7e fix(phone): stop the link when notification access goes away, drop a dead permission
+f8fceb5 fix(glass): log when pinning the peer address fails to persist
+bd3c9eb fix(glass): make a version mismatch a state, not a Toast
+5618feb feat(glass): re-render the queue on arrival and on a timer
+652d89e fix(glass): back off before retrying after a failed accept()
+39a1a78 fix(phone): reset the backoff on a healthy session, not on connect()
+5f57d78 fix(phone): collapse the link service onto a single writer thread
+92611b6 fix(phone): truncate key and appLabel when building the snapshot
+1c50b90 fix(wire): cap key and appLabel, and shrink oversized snapshots to fit
+
+## Files changed
+ .../glassnotify/glass/LinkServerService.java       |  48 +++-
+ .../dev/erinlkolp/glassnotify/glass/PeerPin.java   |  14 +-
+ .../erinlkolp/glassnotify/glass/QueueActivity.java |  56 ++++-
+ .../erinlkolp/glassnotify/glass/SnapshotStore.java |  89 +++++++
+ .../glassnotify/glass/SwipeDetectorTest.java       |  11 +
+ phone/src/main/AndroidManifest.xml                 |   6 +-
+ .../glassnotify/phone/LinkClientService.java       | 278 ++++++++++++++++-----
+ .../glassnotify/phone/NotifyListenerService.java   |  14 ++
+ .../glassnotify/phone/SnapshotBuilder.java         |   9 +-
+ .../glassnotify/phone/SnapshotBuilderTest.java     |  55 ++++
+ .../dev/erinlkolp/glassnotify/wire/FrameCodec.java |   7 +
+ .../dev/erinlkolp/glassnotify/wire/Protocol.java   |  22 ++
+ .../erinlkolp/glassnotify/wire/SnapshotCodec.java  |  35 +++
+ .../erinlkolp/glassnotify/wire/FrameCodecTest.java |  24 ++
+ .../glassnotify/wire/SnapshotCodecTest.java        |  96 ++++++-
+ 15 files changed, 669 insertions(+), 95 deletions(-)
+
+## Diff
+diff --git a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java
+index 66ef3b8..4b9ed5a 100644
+--- a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java
++++ b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java
+@@ -4,21 +4,20 @@ import android.app.Service;
+ import android.bluetooth.BluetoothAdapter;
+ import android.bluetooth.BluetoothDevice;
+ import android.bluetooth.BluetoothServerSocket;
+ import android.bluetooth.BluetoothSocket;
+ import android.content.Context;
+ import android.content.Intent;
+ import android.os.Handler;
+ import android.os.IBinder;
+ import android.os.Looper;
+ import android.util.Log;
+-import android.widget.Toast;
+ 
+ import java.io.IOException;
+ import java.io.InputStream;
+ 
+ import dev.erinlkolp.glassnotify.wire.Frame;
+ import dev.erinlkolp.glassnotify.wire.FrameCodec;
+ import dev.erinlkolp.glassnotify.wire.Hello;
+ import dev.erinlkolp.glassnotify.wire.HelloCodec;
+ import dev.erinlkolp.glassnotify.wire.MessageType;
+ import dev.erinlkolp.glassnotify.wire.Protocol;
+@@ -29,20 +28,30 @@ import dev.erinlkolp.glassnotify.wire.SnapshotCodec;
+  * Accepts the phone's RFCOMM connection and applies whatever it sends.
+  *
+  * Glass is the server because reconnection means an indefinite backoff loop,
+  * which belongs on the device with the larger battery. Blocking in accept()
+  * costs nothing here. Spec section 5.
+  */
+ public final class LinkServerService extends Service {
+ 
+     private static final String TAG = "GlassNotify";
+ 
++    /**
++     * How long to idle before re-arming the listener after a failure.
++     *
++     * A plain sleep rather than the phone's exponential Backoff: Glass is the
++     * passive side, so there is no cost to re-arming promptly, and a growing
++     * delay here would only make the phone's own retry look broken. The point
++     * is purely to stop the loop spinning.
++     */
++    private static final long RETRY_DELAY_MS = 5_000L;
++
+     private volatile boolean running;
+     private Thread acceptThread;
+     private volatile BluetoothServerSocket serverSocket;
+ 
+     /**
+      * The socket of the connection currently being served, for the whole time
+      * serve() is running; null otherwise. Closing it from onDestroy() is what
+      * unblocks a FrameCodec.read() the accept thread is blocked in - the
+      * listening serverSocket is already closed and gone by the time a
+      * connection is being served, so it cannot do that job. Volatile because
+@@ -101,47 +110,61 @@ public final class LinkServerService extends Service {
+     @Override
+     public IBinder onBind(Intent intent) {
+         return null;
+     }
+ 
+     private void acceptLoop() {
+         while (running) {
+             BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+             if (adapter == null || !adapter.isEnabled()) {
+                 // Bluetooth is off. Idle rather than spinning a retry loop.
+-                sleepQuietly(5_000L);
++                sleepQuietly(RETRY_DELAY_MS);
+                 continue;
+             }
+ 
+             try {
+                 serverSocket = adapter.listenUsingRfcommWithServiceRecord(
+                         Protocol.SERVICE_NAME, Protocol.SERVICE_UUID);
+             } catch (IOException e) {
+                 Log.w(TAG, "could not open server socket", e);
+-                sleepQuietly(5_000L);
++                sleepQuietly(RETRY_DELAY_MS);
+                 continue;
+             }
+ 
++            boolean acceptFailed = false;
+             BluetoothSocket socket = null;
+             try {
+                 socket = serverSocket.accept();
+                 closeServerSocket();
+                 connectedSocket = socket;
+                 serve(socket);
+             } catch (IOException e) {
++                acceptFailed = true;
+                 if (running) {
+                     Log.w(TAG, "accept failed", e);
+                 }
+             } finally {
+                 closeConnectedSocket();
+                 closeServerSocket();
+             }
++
++            if (acceptFailed && running) {
++                // The listen path already backed off; this one did not, so an
++                // accept() that failed immediately fell straight back to the
++                // top and spun listen/accept/close plus a log line as fast as
++                // the CPU allowed - on the device with the smallest battery in
++                // the system. Reachable during a Bluetooth adapter toggle,
++                // where isEnabled() above still passes and accept() then
++                // fails. Sleeping after the finally rather than inside the
++                // catch keeps the sockets closed while we wait.
++                sleepQuietly(RETRY_DELAY_MS);
++            }
+         }
+     }
+ 
+     private void serve(BluetoothSocket socket) {
+         BluetoothDevice remote = socket.getRemoteDevice();
+         String address = remote == null ? null : remote.getAddress();
+ 
+         PeerPin pin = GlassNotify.peerPin(this);
+         if (!pin.isAllowed(address)) {
+             Log.w(TAG, "refusing connection from unpinned device " + address);
+@@ -153,38 +176,46 @@ public final class LinkServerService extends Service {
+         lastApplied = null;
+ 
+         try {
+             InputStream in = socket.getInputStream();
+             while (running) {
+                 Frame frame = FrameCodec.read(in);
+ 
+                 if (frame.version != Protocol.VERSION) {
+                     Log.w(TAG, "protocol version " + frame.version
+                             + " from phone, expected " + Protocol.VERSION);
+-                    showMessage(getString(R.string.version_mismatch));
++                    // A state, not a message. A ~3.5s Toast on a see-through
++                    // prism is one the wearer is very likely looking away
++                    // from, and a mismatch that goes unseen looks exactly like
++                    // the app being broken. Spec section 7.1.
++                    GlassNotify.store(this).setVersionMismatch(true);
+                     return;
+                 }
+ 
+                 dispatch(frame);
+             }
+         } catch (IOException e) {
+             // Includes ProtocolException. Either way: close and go back to
+             // accept(). Mid-stream resync is never attempted.
+             Log.i(TAG, "connection ended: " + e.getMessage());
+         }
+     }
+ 
+     private void dispatch(Frame frame) throws IOException {
+         switch (frame.type) {
+             case MessageType.HELLO: {
+                 Hello hello = HelloCodec.decode(frame.body);
+                 Log.i(TAG, "hello from " + hello.deviceName + " " + hello.deviceAddress);
++                // A HELLO that got this far carried a version we understand,
++                // which is the successful handshake that clears a mismatch
++                // left over from a previous connection.
++                GlassNotify.store(this).setVersionMismatch(false);
+                 GlassNotify.store(this).markContact();
+                 break;
+             }
+             case MessageType.PING: {
+                 GlassNotify.store(this).markContact();
+                 break;
+             }
+             case MessageType.SNAPSHOT: {
+                 applySnapshot(SnapshotCodec.decode(frame.body));
+                 break;
+@@ -206,29 +237,20 @@ public final class LinkServerService extends Service {
+             public void run() {
+                 dev.erinlkolp.glassnotify.wire.NotificationItem interrupt =
+                         InterruptPolicy.selectInterrupt(previous, snapshot);
+                 if (interrupt != null) {
+                     overlay.show(interrupt);
+                 }
+             }
+         });
+     }
+ 
+-    private void showMessage(final String message) {
+-        main.post(new Runnable() {
+-            @Override
+-            public void run() {
+-                Toast.makeText(LinkServerService.this, message, Toast.LENGTH_LONG).show();
+-            }
+-        });
+-    }
+-
+     private void closeServerSocket() {
+         BluetoothServerSocket socket = serverSocket;
+         serverSocket = null;
+         if (socket != null) {
+             try {
+                 socket.close();
+             } catch (IOException ignored) {
+             }
+         }
+     }
+diff --git a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/PeerPin.java b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/PeerPin.java
+index d27e0d3..f94af89 100644
+--- a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/PeerPin.java
++++ b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/PeerPin.java
+@@ -1,28 +1,31 @@
+ package dev.erinlkolp.glassnotify.glass;
+ 
+ import android.content.SharedPreferences;
++import android.util.Log;
+ 
+ /**
+  * Trust-on-first-use pinning for the phone's Bluetooth address.
+  *
+  * The server socket would otherwise accept a connection from anything in range
+  * that knows the service UUID, which means a stranger could push text into the
+  * wearer's field of view. The first device to connect is remembered; anything
+  * else is refused.
+  *
+  * Spec section 11.1 requires a reset path, because Glass's own address is
+  * regenerated on a /data wipe and a replacement phone has a different MAC.
+  * `adb shell pm clear dev.erinlkolp.glassnotify.glass` clears this.
+  */
+ public final class PeerPin {
+ 
++    private static final String TAG = "GlassNotify";
++
+     private static final String KEY_ADDRESS = "pinned_peer_address";
+ 
+     private final SharedPreferences prefs;
+ 
+     public PeerPin(SharedPreferences prefs) {
+         if (prefs == null) {
+             throw new NullPointerException("prefs");
+         }
+         this.prefs = prefs;
+     }
+@@ -40,18 +43,25 @@ public final class PeerPin {
+         String pinned = pinnedAddress();
+         return pinned == null || pinned.equalsIgnoreCase(address);
+     }
+ 
+     /** Records the address if none is pinned. Does nothing otherwise. */
+     public void pinIfUnset(String address) {
+         if (address == null) {
+             throw new NullPointerException("address");
+         }
+         if (pinnedAddress() == null) {
+-            prefs.edit().putString(KEY_ADDRESS, address).commit();
++            // A silently dropped write means nothing is ever pinned, so
++            // isAllowed() returns true for every device forever - this control
++            // fails open, and it must not do so without a trace.
++            if (!prefs.edit().putString(KEY_ADDRESS, address).commit()) {
++                Log.w(TAG, "could not pin peer address; every device stays trusted");
++            }
+         }
+     }
+ 
+     public void clear() {
+-        prefs.edit().remove(KEY_ADDRESS).commit();
++        if (!prefs.edit().remove(KEY_ADDRESS).commit()) {
++            Log.w(TAG, "could not clear the pinned peer address");
++        }
+     }
+ }
+diff --git a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/QueueActivity.java b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/QueueActivity.java
+index 6d7aea1..da29bb5 100644
+--- a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/QueueActivity.java
++++ b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/QueueActivity.java
+@@ -1,57 +1,102 @@
+ package dev.erinlkolp.glassnotify.glass;
+ 
+ import android.app.Activity;
+ import android.os.Bundle;
++import android.os.Handler;
++import android.os.Looper;
+ import android.view.MotionEvent;
+ import android.view.View;
+ import android.view.WindowManager;
+ import android.widget.FrameLayout;
+ 
+ import java.util.List;
+ 
+ import dev.erinlkolp.glassnotify.wire.NotificationItem;
+ 
+ /**
+  * Browses the queue, one notification per screen.
+  *
+  * Swipe forward/back pages, matching the gesture launcher's next/previous-app
+  * idiom so there is no new muscle memory to build. Read-only by design: there
+  * is no dismiss, and no action can be fired from here.
++ *
++ * Redraws come from two places while this is foregrounded. The store's
++ * listener covers arriving snapshots and version-mismatch changes, which are
++ * events. Staleness is not an event - nothing happens when the phone goes
++ * quiet - so it also polls, which is the only way the "Not connected" marker
++ * can ever appear on a screen the wearer is already looking at.
+  */
+-public final class QueueActivity extends Activity {
++public final class QueueActivity extends Activity implements SnapshotStore.Listener {
++
++    /**
++     * How often to redraw while foregrounded, purely so staleness surfaces.
++     *
++     * Well under SnapshotStore.STALE_AFTER_MS: presenting an hours-old
++     * notification as current is the failure this guards against (spec
++     * sections 7.3 and 11), so the marker must not lag the threshold by much.
++     */
++    private static final long REFRESH_INTERVAL_MS = 5_000L;
+ 
+     private final QueueCursor cursor = new QueueCursor();
+     private final SwipeDetector detector = new SwipeDetector();
+ 
++    private final Handler refreshHandler = new Handler(Looper.getMainLooper());
++    private final Runnable refreshTick = new Runnable() {
++        @Override
++        public void run() {
++            render();
++            refreshHandler.postDelayed(this, REFRESH_INTERVAL_MS);
++        }
++    };
++
+     private SnapshotStore store;
+     private FrameLayout container;
+ 
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+ 
+         store = GlassNotify.store(this);
+         LinkServerService.start(this);
+ 
+         container = new FrameLayout(this);
+         setContentView(container);
+ 
+         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+         applyImmersiveFlags();
+     }
+ 
+     @Override
+     protected void onResume() {
+         super.onResume();
++        store.setListener(this);
+         // The service may have applied snapshots while we were away.
+         refresh();
++        refreshHandler.postDelayed(refreshTick, REFRESH_INTERVAL_MS);
++    }
++
++    @Override
++    protected void onPause() {
++        // Both must come off here. The store is a process singleton, so a
++        // listener left registered would hold this activity for the life of
++        // the process, and the ticker would keep rebuilding views nobody is
++        // looking at.
++        store.setListener(null);
++        refreshHandler.removeCallbacks(refreshTick);
++        super.onPause();
++    }
++
++    /** Called by the store on the main thread when a snapshot or state arrives. */
++    @Override
++    public void onStoreChanged() {
++        render();
+     }
+ 
+     @Override
+     public void onWindowFocusChanged(boolean hasFocus) {
+         super.onWindowFocusChanged(hasFocus);
+         if (hasFocus) {
+             // Must be re-applied here as well as in onCreate, or the status bar
+             // reclaims its touchable region and starts eating downward swipes.
+             applyImmersiveFlags();
+         }
+@@ -110,20 +155,29 @@ public final class QueueActivity extends Activity {
+     }
+ 
+     private void render() {
+         container.removeAllViews();
+ 
+         // Capture once: current is volatile and items is immutable, so this
+         // local cannot change under us even if the service swaps the snapshot.
+         List<NotificationItem> items = store.items();
+         cursor.setSize(items.size());
+ 
++        if (store.isVersionMismatch()) {
++            // Takes precedence over the queue: whatever is cached is from a
++            // phone this build cannot talk to, so showing it as current would
++            // be worse than showing nothing. Spec section 7.1.
++            container.addView(
++                    CardRenderer.messageCard(this, getString(R.string.version_mismatch)));
++            return;
++        }
++
+         if (items.isEmpty()) {
+             container.addView(CardRenderer.messageCard(this, getString(R.string.empty_queue)));
+             return;
+         }
+ 
+         int index = cursor.index();
+         container.addView(CardRenderer.queueCard(this, items.get(index),
+                 index + 1, items.size(), store.isStale()));
+     }
+ }
+diff --git a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/SnapshotStore.java b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/SnapshotStore.java
+index a205393..7ccd713 100644
+--- a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/SnapshotStore.java
++++ b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/SnapshotStore.java
+@@ -1,12 +1,14 @@
+ package dev.erinlkolp.glassnotify.glass;
+ 
++import android.os.Handler;
++import android.os.Looper;
+ import android.os.SystemClock;
+ import android.util.Log;
+ 
+ import java.io.ByteArrayOutputStream;
+ import java.io.File;
+ import java.io.FileInputStream;
+ import java.io.FileOutputStream;
+ import java.io.IOException;
+ import java.util.ArrayList;
+ import java.util.List;
+@@ -28,45 +30,132 @@ public final class SnapshotStore {
+ 
+     /** Sentinel for "the phone has never made contact in this process". */
+     public static final long NEVER = Long.MIN_VALUE;
+ 
+     /** Spec section 7.3: PING every 10s, so 30s of silence means something is wrong. */
+     public static final long STALE_AFTER_MS = 30_000L;
+ 
+     private static final Snapshot EMPTY =
+             new Snapshot(0L, new ArrayList<NotificationItem>());
+ 
++    /**
++     * Notified when what is on screen would change.
++     *
++     * A plain listener rather than a broadcast or an observer library: both
++     * ends live in the same process, and this has exactly one subscriber.
++     */
++    public interface Listener {
++        /** Always delivered on the main thread. */
++        void onStoreChanged();
++    }
++
+     private final File cacheFile;
+ 
+     private volatile Snapshot current = EMPTY;
+     private volatile long lastContactElapsedMs = NEVER;
++    private volatile boolean versionMismatch;
++
++    /** Created with the first listener, so the store stays constructible off-device. */
++    private Handler mainHandler; // guarded by this
++    private volatile Listener listener;
+ 
+     public SnapshotStore(File cacheFile) {
+         if (cacheFile == null) {
+             throw new NullPointerException("cacheFile");
+         }
+         this.cacheFile = cacheFile;
+     }
+ 
++    /**
++     * Registers the one listener told about changes, or clears it with null.
++     *
++     * The store is a process-wide singleton, so a listener left registered
++     * outlives whatever registered it. The activity registers in onResume and
++     * clears in onPause, which is what keeps this from leaking it.
++     */
++    public synchronized void setListener(Listener listener) {
++        if (listener != null && mainHandler == null) {
++            mainHandler = new Handler(Looper.getMainLooper());
++        }
++        this.listener = listener;
++    }
++
++    /**
++     * Fans a change out on the main thread.
++     *
++     * apply() runs on the accept thread, and the listener redraws a view
++     * hierarchy, so the hop is mandatory rather than a nicety.
++     */
++    private void notifyChanged() {
++        Handler handler;
++        synchronized (this) {
++            if (listener == null) {
++                return;
++            }
++            handler = mainHandler;
++        }
++        handler.post(new Runnable() {
++            @Override
++            public void run() {
++                // Re-read rather than capture: the activity may have paused
++                // between the post and the delivery, and this Runnable holds
++                // only the store, so nothing is kept alive by it.
++                Listener target = listener;
++                if (target != null) {
++                    target.onStoreChanged();
++                }
++            }
++        });
++    }
++
+     /** Never null. Returns an empty snapshot before anything has arrived. */
+     public Snapshot current() {
+         return current;
+     }
+ 
+     /** Replaces the whole queue and persists it. */
+     public void apply(Snapshot snapshot) {
+         if (snapshot == null) {
+             throw new NullPointerException("snapshot");
+         }
+         current = snapshot;
+         markContact();
+         persist(snapshot);
++        // Without this the queue screen shows the previous item until the next
++        // swipe - and if the cursor is already at the end of the list, that
++        // swipe does not move and never redraws either.
++        notifyChanged();
++    }
++
++    /**
++     * True when the phone last spoke a protocol version this build cannot read.
++     *
++     * Spec section 7.1 requires an explicit state, not a message: on a
++     * see-through prism the wearer is very likely looking away for the few
++     * seconds a Toast is up, and a mismatch that scrolls past unseen is
++     * indistinguishable from the app being broken. Loud failure beats
++     * mysterious silence, so this sticks until a good handshake clears it.
++     *
++     * In-memory rather than on disk deliberately: it describes the phone
++     * currently on the other end of the link, not anything about this device.
++     */
++    public boolean isVersionMismatch() {
++        return versionMismatch;
++    }
++
++    /** Set on a foreign protocol version; cleared by a successful handshake. */
++    public void setVersionMismatch(boolean mismatch) {
++        if (versionMismatch == mismatch) {
++            return;
++        }
++        versionMismatch = mismatch;
++        notifyChanged();
+     }
+ 
+     /** Records that the phone is alive, without changing the queue. Called on PING. */
+     public void markContact() {
+         lastContactElapsedMs = SystemClock.elapsedRealtime();
+     }
+ 
+     public boolean isStale() {
+         return isStale(lastContactElapsedMs, SystemClock.elapsedRealtime());
+     }
+diff --git a/glass/src/test/java/dev/erinlkolp/glassnotify/glass/SwipeDetectorTest.java b/glass/src/test/java/dev/erinlkolp/glassnotify/glass/SwipeDetectorTest.java
+index 5d8c8ca..bcd9af6 100644
+--- a/glass/src/test/java/dev/erinlkolp/glassnotify/glass/SwipeDetectorTest.java
++++ b/glass/src/test/java/dev/erinlkolp/glassnotify/glass/SwipeDetectorTest.java
+@@ -57,20 +57,31 @@ public class SwipeDetectorTest {
+         // rejected while a genuine vertical drag is not misread as paging.
+         assertEquals(Swipe.NONE, gesture(200f, 210f, 40f, 250f, 250L));
+     }
+ 
+     @Test
+     public void aDiagonalSwipeStillCountsIfHorizontalDominates() {
+         assertEquals(Swipe.FORWARD,
+                 gesture(200f, 200f + SwipeDetector.SWIPE_MIN_DX + 40f, 100f, 130f, 250L));
+     }
+ 
++    @Test
++    public void aSwipeInsideTheDominanceBandIsRejected() {
++        // dx=60, dy=55 is the band where the two candidate rules disagree.
++        // A naive absDx > absDy accepts it; the ratio rule this detector
++        // documents rejects it, because 60 < 55 * 1.2. The distinction is not
++        // cosmetic - the pad is anisotropic, so a movement that looks
++        // horizontal in view coordinates need not be one on the glass. If a
++        // later change reverts to comparing raw dx to raw dy, this fails.
++        assertEquals(Swipe.NONE, gesture(200f, 260f, 100f, 155f, 250L));
++    }
++
+     @Test
+     public void cancellingDiscardsTheGestureInProgress() {
+         detector.begin(new TouchSample(200f, 100f, 0L));
+         detector.move(new TouchSample(400f, 100f, 100L));
+         detector.cancel();
+ 
+         assertEquals("a cancelled gesture must not resolve", Swipe.NONE,
+                 detector.end(new TouchSample(400f, 100f, 200L)));
+     }
+ 
+diff --git a/phone/src/main/AndroidManifest.xml b/phone/src/main/AndroidManifest.xml
+index 7407ad9..a3c1810 100644
+--- a/phone/src/main/AndroidManifest.xml
++++ b/phone/src/main/AndroidManifest.xml
+@@ -1,17 +1,21 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+ 
+     <uses-permission android:name="android.permission.BLUETOOTH" />
+     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
++    <!--
++      No RECEIVE_BOOT_COMPLETED: this module has no boot receiver. Boot
++      coverage comes from the system rebinding NotifyListenerService, which
++      starts the link service from onListenerConnected.
++    -->
+     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+ 
+     <application
+         android:allowBackup="false"
+         android:label="@string/app_name">
+ 
+         <service
+             android:name=".NotifyListenerService"
+             android:exported="true"
+             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+diff --git a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java
+index 8a3bd0a..be00bcf 100644
+--- a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java
++++ b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java
+@@ -3,67 +3,142 @@ package dev.erinlkolp.glassnotify.phone;
+ import android.app.Notification;
+ import android.app.NotificationChannel;
+ import android.app.NotificationManager;
+ import android.app.Service;
+ import android.bluetooth.BluetoothAdapter;
+ import android.bluetooth.BluetoothDevice;
+ import android.bluetooth.BluetoothSocket;
+ import android.content.Context;
+ import android.content.Intent;
+ import android.os.IBinder;
++import android.os.SystemClock;
+ import android.util.Log;
+ 
+ import java.io.IOException;
+ import java.util.Set;
+ 
+ import dev.erinlkolp.glassnotify.wire.FrameCodec;
+ import dev.erinlkolp.glassnotify.wire.Hello;
+ import dev.erinlkolp.glassnotify.wire.HelloCodec;
+ import dev.erinlkolp.glassnotify.wire.MessageType;
+ import dev.erinlkolp.glassnotify.wire.Protocol;
+ import dev.erinlkolp.glassnotify.wire.Snapshot;
+ import dev.erinlkolp.glassnotify.wire.SnapshotCodec;
+ 
+ /**
+  * Owns the RFCOMM connection to Glass and the reconnect loop.
+  *
+  * A foreground service because targetSdk 28 forbids indefinite background
+  * execution, and because this must survive Doze and App Standby. The phone
+  * owns retry rather than Glass, since a backoff loop belongs on the device
+  * with the larger battery. Spec section 5.
++ *
++ * <h3>Threading</h3>
++ *
++ * There is exactly one writer. The worker thread owns the socket outright and
++ * is the only code in this class that calls {@link FrameCodec#write} - HELLO,
++ * SNAPSHOT and PING all leave from it, in that one thread, in order. Nothing
++ * else may touch the output stream.
++ *
++ * Everything else is a handoff. {@link #onSnapshot} runs on the main thread
++ * (SnapshotBus delivers on the main looper) and does nothing but raise a flag
++ * and signal the worker; it never touches a socket and never blocks. The
++ * worker then re-reads {@link SnapshotBus#latest()}, which is why coalescing
++ * is free: several snapshots arriving before the worker wakes collapse into
++ * the newest one, with no queue to bound.
++ *
++ * This shape exists because the two obvious alternatives are both broken.
++ * Writing from the bus callback puts a blocking RFCOMM write on the UI thread,
++ * where a stalled write waits out the ACL supervision timeout and ANRs - which
++ * takes NotifyListenerService down with it. And sharing a socket field between
++ * the connect path and the write path lets a write land on a socket still
++ * inside connect(), whose error handling then closes the very socket the
++ * worker is trying to establish.
+  */
+ public final class LinkClientService extends Service implements SnapshotBus.Listener {
+ 
+     private static final String TAG = "GlassNotify";
+     private static final String CHANNEL_ID = "glass_link";
+     private static final int NOTIFICATION_ID = 1;
+ 
++    private static final byte[] NO_BODY = new byte[0];
++
+     /** Spec section 7.3. */
+     private static final long PING_INTERVAL_MS = 10_000L;
+ 
++    /** How long to idle when there is no bonded Glass to connect to at all. */
++    private static final long NO_DEVICE_RETRY_MS = 10_000L;
++
++    /**
++     * How many PINGs a session must complete before the backoff is reset.
++     *
++     * A bare connect() is not proof of a working session. Glass accepts the
++     * socket before it has checked either the MAC pin or the protocol version,
++     * and closes it immediately afterwards in both cases. Resetting on
++     * connect() therefore reads those two failures as success and pins the
++     * retry interval at Backoff.INITIAL_MS forever: connect, reset, HELLO,
++     * Glass closes, PING fails, ~1s wait, repeat - at full duty cycle, in
++     * exactly the situations the exponential backoff exists for.
++     *
++     * A PING that completes without an IOException means Glass held the link
++     * for at least PING_INTERVAL_MS, which neither of those paths does. One is
++     * enough; asking for more only delays recovery from a genuine dropout.
++     */
++    private static final int HEALTHY_SESSION_PINGS = 1;
++
+     private final Backoff backoff = new Backoff();
+-    private final Object socketLock = new Object();
+-    /** All frame writes funnel through here; concurrent writes would splice frames. */
+-    private final Object writeLock = new Object();
+ 
+     private volatile boolean running;
+     private Thread worker;
+-    private BluetoothSocket socket;
+ 
+-    /** Set when something wants an immediate retry, e.g. ACL_CONNECTED. */
++    /**
++     * The socket currently being handed to {@code connect()}.
++     *
++     * Written by the worker immediately before the blocking connect and
++     * cleared once it returns. Read only by {@link #onDestroy}, which closes
++     * it - that is the only way to make a blocking connect() return, and
++     * without it the worker stays unkillable until Glass answers or the stack
++     * gives up.
++     *
++     * Deliberately separate from {@link #connectedSocket}: nothing may write a
++     * frame to this one, because it is not connected yet.
++     */
++    private volatile BluetoothSocket connectingSocket;
++
++    /**
++     * The live, connected socket, published only after {@code connect()} has
++     * returned successfully and cleared as soon as the session ends.
++     *
++     * This is the only socket the write path may touch, and only the worker
++     * thread writes to it. {@link #onDestroy} may close it, which is how a
++     * write stalled on a dead ACL link is aborted rather than waited out.
++     */
++    private volatile BluetoothSocket connectedSocket;
++
++    /** Guards {@link #wakeRequested} and {@link #snapshotPending}. */
+     private final Object wakeLock = new Object();
++
++    /** Set when something wants an immediate retry, e.g. ACL_CONNECTED. */
+     private boolean wakeRequested; // guarded by wakeLock
+ 
++    /** Set when a newer snapshot is waiting to be sent. */
++    private boolean snapshotPending; // guarded by wakeLock
++
+     public static void start(Context context) {
+         context.startService(new Intent(context, LinkClientService.class));
+     }
+ 
++    /** Tears the link down. Used when the source of snapshots goes away. */
++    public static void stop(Context context) {
++        context.stopService(new Intent(context, LinkClientService.class));
++    }
++
+     /** Cuts the current backoff short. Called when Glass comes into range. */
+     public static void wake(Context context) {
+         Intent intent = new Intent(context, LinkClientService.class);
+         intent.putExtra("wake", true);
+         context.startService(intent);
+     }
+ 
+     @Override
+     public void onCreate() {
+         super.onCreate();
+@@ -89,141 +164,185 @@ public final class LinkClientService extends Service implements SnapshotBus.List
+                     connectLoop();
+                 }
+             }, "glassnotify-link");
+             worker.start();
+         }
+         return START_STICKY;
+     }
+ 
+     @Override
+     public void onDestroy() {
++        // Ordering matters. running is cleared first so that the worker, which
++        // re-checks it after publishing each socket field, sees the shutdown
++        // even if both closes below happen to land in the gap between the
++        // worker publishing a socket and actually using it.
+         running = false;
+         SnapshotBus.get().setListener(null);
+-        closeSocket();
++        // Abort whatever the worker is parked in: a blocking connect(), or a
++        // write stalled on an ACL link that is no longer there.
++        closeQuietly(connectingSocket);
++        closeQuietly(connectedSocket);
++        // And wake a worker parked in a backoff or an inter-ping wait.
+         synchronized (wakeLock) {
+             wakeLock.notifyAll();
+         }
+         super.onDestroy();
+     }
+ 
+     @Override
+     public IBinder onBind(Intent intent) {
+         return null;
+     }
+ 
+     private void connectLoop() {
+         while (running) {
+             BluetoothDevice glass = findBondedGlass();
+             if (glass == null) {
+                 status(BluetoothAdapter.getDefaultAdapter() == null
+                         || !BluetoothAdapter.getDefaultAdapter().isEnabled()
+                         ? R.string.status_no_bluetooth
+                         : R.string.status_not_bonded);
+-                waitFor(10_000L);
++                waitForWake(NO_DEVICE_RETRY_MS);
+                 continue;
+             }
+ 
+             BluetoothSocket attempt = null;
+             try {
+                 attempt = glass.createRfcommSocketToServiceRecord(Protocol.SERVICE_UUID);
+                 // Discovery is expensive and interferes with connecting.
+                 BluetoothAdapter.getDefaultAdapter().cancelDiscovery();
+ 
+-                // Published before connect() so a concurrent onDestroy() can
+-                // close this socket while it is still blocked inside
+-                // connect() - closing it there makes connect() throw instead
+-                // of leaving the worker unkillable until Glass answers.
+-                synchronized (socketLock) {
+-                    socket = attempt;
+-                }
++                // Published before connect() so onDestroy() can close it and
++                // make the blocking connect return. Nothing writes to it here.
++                connectingSocket = attempt;
+                 attempt.connect();
+ 
++                // Publish before clearing, so there is never an instant where
++                // neither field names this socket and onDestroy() would close
++                // nothing.
++                connectedSocket = attempt;
++                connectingSocket = null;
++
+                 if (!running) {
+-                    // onDestroy() ran while connect() was blocking. Don't
+-                    // send Glass a live handshake and snapshot from a
+-                    // service that's going away.
++                    // onDestroy() ran while connect() was blocking. Don't send
++                    // Glass a live handshake and snapshot from a service that
++                    // is going away. Any onDestroy() that raced past the two
++                    // closes above is caught here, because it clears running
++                    // before it closes anything.
+                     return;
+                 }
+ 
+-                backoff.reset();
++                // Note: no backoff.reset() here. See HEALTHY_SESSION_PINGS -
++                // the reset happens in pump(), once the session has proven it
++                // is more than an accept() Glass is about to hang up on.
+                 status(R.string.status_connected);
+                 pump(attempt);
+             } catch (IOException e) {
+                 Log.i(TAG, "connect failed: " + e.getMessage());
+             } finally {
++                connectedSocket = null;
++                connectingSocket = null;
+                 closeQuietly(attempt);
+-                synchronized (socketLock) {
+-                    socket = null;
+-                }
+             }
+ 
+             if (running) {
+                 status(R.string.status_connecting);
+-                waitFor(backoff.nextDelayMs());
++                waitForWake(backoff.nextDelayMs());
+             }
+         }
+     }
+ 
+-    /** Sends the handshake, an immediate snapshot, then heartbeats until the link dies. */
++    /**
++     * Sends the handshake, an immediate snapshot, then snapshots and
++     * heartbeats until the link dies.
++     *
++     * Runs on the worker thread and is the only place frames are written.
++     * Every IOException propagates out to the retry loop: there is no read
++     * side on this end, so a failed write is the only liveness signal there
++     * is, and swallowing one would leave the phone reporting Connected to a
++     * socket that has been dead for hours.
++     */
+     private void pump(BluetoothSocket connected) throws IOException {
+         BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+         writeFrame(connected, MessageType.HELLO,
+                 HelloCodec.encode(new Hello(
+                         adapter.getName() == null ? "phone" : adapter.getName(),
+                         adapter.getAddress() == null ? "" : adapter.getAddress())));
+ 
+         // Glass has whatever it cached from last time; replace it immediately.
+-        send(SnapshotBus.get().latest());
++        // Anything flagged while we were connecting is subsumed by this, since
++        // latest() is by definition at least as new.
++        clearPendingSnapshot();
++        writeSnapshot(connected, SnapshotBus.get().latest());
++
++        long nextPingAt = SystemClock.elapsedRealtime() + PING_INTERVAL_MS;
++        int successfulPings = 0;
+ 
+         while (running) {
+-            waitFor(PING_INTERVAL_MS);
++            boolean snapshotDue =
++                    awaitWork(nextPingAt - SystemClock.elapsedRealtime());
+             if (!running) {
+                 return;
+             }
+-            // A write failure is how a half-dead socket is discovered - there
+-            // is no read side to notice EOF on. Throws out to the retry loop.
+-            writeFrame(connected, MessageType.PING, new byte[0]);
++
++            if (snapshotDue) {
++                writeSnapshot(connected, SnapshotBus.get().latest());
++            }
++
++            if (SystemClock.elapsedRealtime() >= nextPingAt) {
++                writeFrame(connected, MessageType.PING, NO_BODY);
++                nextPingAt = SystemClock.elapsedRealtime() + PING_INTERVAL_MS;
++
++                if (successfulPings < HEALTHY_SESSION_PINGS
++                        && ++successfulPings == HEALTHY_SESSION_PINGS) {
++                    // The session is real, not an accept() Glass refused.
++                    backoff.reset();
++                }
++            }
+         }
+     }
+ 
++    /**
++     * Called by SnapshotBus on the main thread.
++     *
++     * Does not send. A blocking RFCOMM write here would sit on the UI thread
++     * until the ACL supervision timeout when Glass walks out of range, which
++     * is an ANR, and an ANR kill takes NotifyListenerService with it. So this
++     * only raises a flag and signals the worker, which re-reads
++     * SnapshotBus.latest() - so two snapshots arriving before the worker picks
++     * one up collapse into the newer with no queue to grow.
++     */
+     @Override
+     public void onSnapshot(Snapshot snapshot) {
+-        send(snapshot);
++        synchronized (wakeLock) {
++            snapshotPending = true;
++            wakeLock.notifyAll();
++        }
+     }
+ 
+-    private void send(Snapshot snapshot) {
+-        BluetoothSocket current;
+-        synchronized (socketLock) {
+-            current = socket;
+-        }
+-        if (current == null) {
+-            return; // Not connected. The next connection sends the latest anyway.
+-        }
+-        try {
+-            writeFrame(current, MessageType.SNAPSHOT, SnapshotCodec.encode(snapshot));
+-        } catch (IOException e) {
+-            Log.i(TAG, "send failed, dropping link: " + e.getMessage());
+-            closeSocket(); // Unblocks the worker so it can back off and retry.
+-        }
++    private void writeSnapshot(BluetoothSocket connected, Snapshot snapshot) throws IOException {
++        // encodeWithinFrame, not encode: an oversized snapshot must lose its
++        // oldest items rather than throw, because the reconnect that follows
++        // would re-send the identical snapshot and wedge the link for good.
++        writeFrame(connected, MessageType.SNAPSHOT, SnapshotCodec.encodeWithinFrame(snapshot));
+     }
+ 
+     /**
+-     * All frame writes funnel through here. The worker thread writes HELLO
+-     * and PING; the SnapshotBus callback thread writes SNAPSHOT. Without a
+-     * single choke point around the actual write, the two could interleave
+-     * bytes on the same stream and splice a frame - undetectable on this end
+-     * since there is no read side to notice the desync.
++     * The single write choke point, reached only from the worker thread.
++     *
++     * There is deliberately no lock here. A lock would only be needed if two
++     * threads could write, and the whole point of the handoff in
++     * {@link #onSnapshot} is that they cannot. Reintroducing one would be a
++     * sign that a second writer has crept back in.
+      */
+     private void writeFrame(BluetoothSocket target, int type, byte[] body) throws IOException {
+-        synchronized (writeLock) {
+-            FrameCodec.write(target.getOutputStream(), type, body);
+-        }
++        FrameCodec.write(target.getOutputStream(), type, body);
+     }
+ 
+     private BluetoothDevice findBondedGlass() {
+         BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+         if (adapter == null || !adapter.isEnabled()) {
+             return null;
+         }
+         Set<BluetoothDevice> bonded = adapter.getBondedDevices();
+         if (bonded == null) {
+             return null;
+@@ -231,45 +350,74 @@ public final class LinkClientService extends Service implements SnapshotBus.List
+         for (BluetoothDevice device : bonded) {
+             String name = device.getName();
+             if (name != null && name.toLowerCase(java.util.Locale.US).contains("glass")) {
+                 return device;
+             }
+         }
+         return null;
+     }
+ 
+     /**
+-     * Sleeps, but returns early if wake() is called - including a wake()
+-     * that arrived just before this method was entered, e.g. while status()
+-     * was busy on a Binder call to NotificationManager. Without the flag,
+-     * that notifyAll() would land with nobody waiting and be lost, forcing
+-     * the full stale backoff to run out regardless.
++     * Sleeps between connection attempts, but returns early if wake() is
++     * called - including a wake() that arrived just before this method was
++     * entered, e.g. while status() was busy on a Binder call to
++     * NotificationManager. Without the flag, that notifyAll() would land with
++     * nobody waiting and be lost, forcing the full stale backoff to run out
++     * regardless.
++     *
++     * Deliberately not woken by a pending snapshot. A chatty notification
++     * stream must not be able to shorten the reconnect backoff, or the retry
++     * cadence would be set by how much mail arrives.
+      */
+-    private void waitFor(long ms) {
++    private void waitForWake(long ms) {
+         synchronized (wakeLock) {
+             if (wakeRequested) {
+                 wakeRequested = false;
+                 return;
+             }
+-            try {
+-                wakeLock.wait(ms);
+-            } catch (InterruptedException e) {
+-                Thread.currentThread().interrupt();
++            if (running && ms > 0) {
++                // wait(0) waits forever; ms is always positive here, but the
++                // guard keeps that from becoming a hang if it ever is not.
++                try {
++                    wakeLock.wait(ms);
++                } catch (InterruptedException e) {
++                    Thread.currentThread().interrupt();
++                }
+             }
+             wakeRequested = false;
+         }
+     }
+ 
+-    private void closeSocket() {
+-        synchronized (socketLock) {
+-            closeQuietly(socket);
+-            socket = null;
++    /**
++     * Parks the worker until the next PING is due, a snapshot needs sending,
++     * or the service is going away. Returns true if a snapshot is waiting,
++     * consuming the flag.
++     */
++    private boolean awaitWork(long ms) {
++        synchronized (wakeLock) {
++            if (running && !snapshotPending && ms > 0) {
++                try {
++                    wakeLock.wait(ms);
++                } catch (InterruptedException e) {
++                    Thread.currentThread().interrupt();
++                }
++            }
++            boolean pending = snapshotPending;
++            snapshotPending = false;
++            return pending;
++        }
++    }
++
++    /** Clears any pending flag without acting on it. */
++    private void clearPendingSnapshot() {
++        synchronized (wakeLock) {
++            snapshotPending = false;
+         }
+     }
+ 
+     private static void closeQuietly(BluetoothSocket s) {
+         if (s != null) {
+             try {
+                 s.close();
+             } catch (IOException ignored) {
+             }
+         }
+diff --git a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/NotifyListenerService.java b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/NotifyListenerService.java
+index 03c6824..a31db1c 100644
+--- a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/NotifyListenerService.java
++++ b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/NotifyListenerService.java
+@@ -27,20 +27,34 @@ public final class NotifyListenerService extends NotificationListenerService {
+ 
+     @Override
+     public void onListenerConnected() {
+         super.onListenerConnected();
+         // getActiveNotifications is only valid once connected, so this is the
+         // first point at which a complete snapshot can be built.
+         republish();
+         LinkClientService.start(this);
+     }
+ 
++    /**
++     * Notification access was revoked, or the system is unbinding us.
++     *
++     * Without this the link service outlives its only source of snapshots and
++     * carries on as a foreground service, pinging Glass every 10s and holding
++     * a frozen queue on screen that the wearer has no way of telling is dead.
++     */
++    @Override
++    public void onListenerDisconnected() {
++        super.onListenerDisconnected();
++        Log.i(TAG, "listener disconnected, stopping the link");
++        LinkClientService.stop(this);
++    }
++
+     @Override
+     public void onNotificationPosted(StatusBarNotification sbn) {
+         republish();
+     }
+ 
+     @Override
+     public void onNotificationRemoved(StatusBarNotification sbn) {
+         // Removals matter as much as posts: without them the Glass queue rots
+         // within a day. Spec section 6.
+         republish();
+diff --git a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/SnapshotBuilder.java b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/SnapshotBuilder.java
+index f445e23..35b8636 100644
+--- a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/SnapshotBuilder.java
++++ b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/SnapshotBuilder.java
+@@ -52,22 +52,27 @@ public final class SnapshotBuilder {
+                 return a.postedAt > b.postedAt ? -1 : 1;
+             }
+         });
+ 
+         List<NotificationItem> items = new ArrayList<NotificationItem>();
+         for (SourceNotification source : eligible) {
+             if (items.size() >= Protocol.MAX_ITEMS) {
+                 break;
+             }
+             items.add(new NotificationItem(
+-                    source.key,
+-                    source.appLabel,
++                    // key and appLabel are as app-controlled as the body text
++                    // is: getKey()'s tag component and the label from the app's
++                    // manifest are both unbounded. Untruncated, twenty items
++                    // can push the snapshot past MAX_FRAME_BYTES, which the
++                    // link cannot recover from on its own.
++                    truncate(source.key, Protocol.MAX_KEY_CHARS),
++                    truncate(source.appLabel, Protocol.MAX_APP_LABEL_CHARS),
+                     truncate(source.title, Protocol.MAX_TITLE_CHARS),
+                     truncate(source.text, Protocol.MAX_TEXT_CHARS),
+                     source.postedAt,
+                     allowlist.get(source.packageName)));
+         }
+ 
+         return new Snapshot(snapshotId, items);
+     }
+ 
+     /** Null-safe truncation. NotificationItem forbids nulls, so normalise here. */
+diff --git a/phone/src/test/java/dev/erinlkolp/glassnotify/phone/SnapshotBuilderTest.java b/phone/src/test/java/dev/erinlkolp/glassnotify/phone/SnapshotBuilderTest.java
+index 57b055e..8de4e95 100644
+--- a/phone/src/test/java/dev/erinlkolp/glassnotify/phone/SnapshotBuilderTest.java
++++ b/phone/src/test/java/dev/erinlkolp/glassnotify/phone/SnapshotBuilderTest.java
+@@ -100,20 +100,75 @@ public class SnapshotBuilderTest {
+             long_.append('y');
+         }
+         SourceNotification s = new SourceNotification("a", "pkg", "Signal", long_.toString(),
+                 "body", 100L, false);
+ 
+         Snapshot snapshot = SnapshotBuilder.build(1L, Arrays.asList(s), allow("pkg", Tier.QUEUE));
+ 
+         assertEquals(Protocol.MAX_TITLE_CHARS, snapshot.items.get(0).title.length());
+     }
+ 
++    @Test
++    public void truncatesTheKey() {
++        // getKey() is "userId|package|id|tag|uid" and the tag is whatever the
++        // posting app put there. Twenty of these at multi-KB apiece would take
++        // the snapshot past MAX_FRAME_BYTES, which the link cannot recover from.
++        StringBuilder long_ = new StringBuilder();
++        for (int i = 0; i < Protocol.MAX_KEY_CHARS * 2; i++) {
++            long_.append('k');
++        }
++        SourceNotification s = new SourceNotification(long_.toString(), "pkg", "Signal",
++                "title", "body", 100L, false);
++
++        Snapshot snapshot = SnapshotBuilder.build(1L, Arrays.asList(s), allow("pkg", Tier.QUEUE));
++
++        assertEquals(Protocol.MAX_KEY_CHARS, snapshot.items.get(0).key.length());
++    }
++
++    @Test
++    public void truncatesTheAppLabel() {
++        StringBuilder long_ = new StringBuilder();
++        for (int i = 0; i < Protocol.MAX_APP_LABEL_CHARS * 2; i++) {
++            long_.append('a');
++        }
++        SourceNotification s = new SourceNotification("a", "pkg", long_.toString(),
++                "title", "body", 100L, false);
++
++        Snapshot snapshot = SnapshotBuilder.build(1L, Arrays.asList(s), allow("pkg", Tier.QUEUE));
++
++        assertEquals(Protocol.MAX_APP_LABEL_CHARS, snapshot.items.get(0).appLabel.length());
++    }
++
++    @Test
++    public void aWorstCaseSnapshotStillEncodesIntoOneFrame() {
++        // The end-to-end statement of the cap: MAX_ITEMS notifications whose
++        // every field is oversized must still produce a sendable frame.
++        StringBuilder long_ = new StringBuilder();
++        for (int i = 0; i < 4_000; i++) {
++            long_.append('z');
++        }
++        String huge = long_.toString();
++        List<SourceNotification> sources = new ArrayList<SourceNotification>();
++        for (int i = 0; i < Protocol.MAX_ITEMS; i++) {
++            sources.add(new SourceNotification(huge + i, "pkg", huge, huge, huge, 100L + i, false));
++        }
++
++        Snapshot snapshot = SnapshotBuilder.build(1L, sources, allow("pkg", Tier.QUEUE));
++
++        try {
++            assertTrue(dev.erinlkolp.glassnotify.wire.SnapshotCodec.encode(snapshot).length
++                    <= dev.erinlkolp.glassnotify.wire.FrameCodec.MAX_BODY_BYTES);
++        } catch (java.io.IOException e) {
++            throw new AssertionError("worst-case snapshot did not encode", e);
++        }
++    }
++
+     @Test
+     public void leavesShortTextAlone() {
+         Snapshot snapshot = SnapshotBuilder.build(1L,
+                 Arrays.asList(source("a", "pkg", 100L)), allow("pkg", Tier.QUEUE));
+ 
+         assertEquals("hello", snapshot.items.get(0).text);
+     }
+ 
+     @Test
+     public void dropsOngoingNotifications() {
+diff --git a/wire/src/main/java/dev/erinlkolp/glassnotify/wire/FrameCodec.java b/wire/src/main/java/dev/erinlkolp/glassnotify/wire/FrameCodec.java
+index ecede1b..ce455f1 100644
+--- a/wire/src/main/java/dev/erinlkolp/glassnotify/wire/FrameCodec.java
++++ b/wire/src/main/java/dev/erinlkolp/glassnotify/wire/FrameCodec.java
+@@ -17,20 +17,27 @@ import java.io.OutputStream;
+  * </pre>
+  *
+  * DataInputStream's readInt and readFully already loop over short reads, which
+  * is what makes this correct against a socket that fragments arbitrarily.
+  */
+ public final class FrameCodec {
+ 
+     /** version + type. */
+     private static final int HEADER_AFTER_LENGTH = 2;
+ 
++    /**
++     * Largest body that still fits inside MAX_FRAME_BYTES once framed.
++     * Exposed so senders can shrink a message rather than discover at write
++     * time that it cannot be sent at all.
++     */
++    public static final int MAX_BODY_BYTES = Protocol.MAX_FRAME_BYTES - HEADER_AFTER_LENGTH;
++
+     private FrameCodec() {
+     }
+ 
+     public static void write(OutputStream out, int type, byte[] body) throws IOException {
+         int length = body.length + HEADER_AFTER_LENGTH;
+         if (length > Protocol.MAX_FRAME_BYTES) {
+             throw new ProtocolException("frame of " + length
+                     + " bytes exceeds the " + Protocol.MAX_FRAME_BYTES + " byte limit");
+         }
+         DataOutputStream data = new DataOutputStream(out);
+diff --git a/wire/src/main/java/dev/erinlkolp/glassnotify/wire/Protocol.java b/wire/src/main/java/dev/erinlkolp/glassnotify/wire/Protocol.java
+index b7c51ac..20c0e89 100644
+--- a/wire/src/main/java/dev/erinlkolp/glassnotify/wire/Protocol.java
++++ b/wire/src/main/java/dev/erinlkolp/glassnotify/wire/Protocol.java
+@@ -16,20 +16,42 @@ public final class Protocol {
+ 
+     /** Snapshots carry at most this many items. */
+     public static final int MAX_ITEMS = 20;
+ 
+     /** Body text is truncated to this many characters by the phone, before sending. */
+     public static final int MAX_TEXT_CHARS = 240;
+ 
+     /** Titles are truncated to this many characters by the phone, before sending. */
+     public static final int MAX_TITLE_CHARS = 80;
+ 
++    /**
++     * Keys are truncated to this many characters by the phone, before sending.
++     *
++     * StatusBarNotification.getKey() is "userId|package|id|tag|uid" and the tag
++     * component is app-controlled and unbounded, so without a cap a single
++     * misbehaving app can push a snapshot past MAX_FRAME_BYTES. 96 characters
++     * comfortably covers a real package name plus a sane tag, which is all the
++     * uniqueness the queue needs - the key is only ever compared for equality
++     * between consecutive snapshots, never interpreted.
++     */
++    public static final int MAX_KEY_CHARS = 96;
++
++    /**
++     * App labels are truncated to this many characters by the phone.
++     *
++     * Rendered uppercase at 12dp with letter spacing on a 320x180dp prism, so
++     * anything past roughly two dozen characters is ellipsised on screen
++     * regardless. Same unbounded-input concern as MAX_KEY_CHARS: the label
++     * comes from the app's own manifest.
++     */
++    public static final int MAX_APP_LABEL_CHARS = 24;
++
+     /** SDP service record name advertised by the Glass server socket. */
+     public static final String SERVICE_NAME = "GlassNotify";
+ 
+     /** Fixed for the life of the project. Regenerating it breaks installed builds. */
+     public static final UUID SERVICE_UUID =
+             UUID.fromString("7d9313f0-110b-4d84-8daa-10389eba6b55");
+ 
+     private Protocol() {
+     }
+ }
+diff --git a/wire/src/main/java/dev/erinlkolp/glassnotify/wire/SnapshotCodec.java b/wire/src/main/java/dev/erinlkolp/glassnotify/wire/SnapshotCodec.java
+index 139b274..fe0e6cc 100644
+--- a/wire/src/main/java/dev/erinlkolp/glassnotify/wire/SnapshotCodec.java
++++ b/wire/src/main/java/dev/erinlkolp/glassnotify/wire/SnapshotCodec.java
+@@ -45,20 +45,55 @@ public final class SnapshotCodec {
+             out.writeUTF(item.title);
+             out.writeUTF(item.text);
+             out.writeLong(item.postedAt);
+             out.writeByte(item.tier.code);
+         }
+ 
+         out.flush();
+         return bytes.toByteArray();
+     }
+ 
++    /**
++     * Encodes, dropping the oldest items until the result fits in one frame.
++     *
++     * The per-field caps in {@link Protocol} should already make this
++     * impossible, but "should" is not a guarantee against input the phone does
++     * not control. If an oversized snapshot ever did reach the writer, the
++     * failure mode without this is unrecoverable rather than merely lossy:
++     * FrameCodec.write throws, the sender drops the link, reconnects, and the
++     * handshake re-sends the identical snapshot - a reconnect loop that never
++     * self-heals and presents as "phone connected, Glass blank". Losing the
++     * tail of the queue is strictly better than that.
++     *
++     * Items are newest-first, so the oldest is the last one - which is also
++     * the one the wearer is least likely to be looking for.
++     */
++    public static byte[] encodeWithinFrame(Snapshot snapshot) throws IOException {
++        byte[] encoded = encode(snapshot);
++        if (encoded.length <= FrameCodec.MAX_BODY_BYTES) {
++            return encoded;
++        }
++
++        List<NotificationItem> items =
++                new ArrayList<NotificationItem>(snapshot.items);
++        while (!items.isEmpty()) {
++            items.remove(items.size() - 1);
++            encoded = encode(new Snapshot(snapshot.snapshotId, items));
++            if (encoded.length <= FrameCodec.MAX_BODY_BYTES) {
++                return encoded;
++            }
++        }
++        // An empty snapshot is a fixed ten bytes, so the loop above always
++        // returns before falling through. Kept so the compiler agrees.
++        return encoded;
++    }
++
+     public static Snapshot decode(byte[] body) throws IOException {
+         DataInputStream in = new DataInputStream(new ByteArrayInputStream(body));
+ 
+         long snapshotId = in.readLong();
+         int count = in.readShort();
+         if (count < 0 || count > Protocol.MAX_ITEMS) {
+             throw new ProtocolException("snapshot declares " + count
+                     + " items, outside 0.." + Protocol.MAX_ITEMS);
+         }
+ 
+diff --git a/wire/src/test/java/dev/erinlkolp/glassnotify/wire/FrameCodecTest.java b/wire/src/test/java/dev/erinlkolp/glassnotify/wire/FrameCodecTest.java
+index c0d1478..8d69836 100644
+--- a/wire/src/test/java/dev/erinlkolp/glassnotify/wire/FrameCodecTest.java
++++ b/wire/src/test/java/dev/erinlkolp/glassnotify/wire/FrameCodecTest.java
+@@ -150,20 +150,44 @@ public class FrameCodecTest {
+         byte[] truncated = new byte[encoded.length - 2];
+         System.arraycopy(encoded, 0, truncated, 0, truncated.length);
+ 
+         try {
+             FrameCodec.read(new ByteArrayInputStream(truncated));
+             fail("expected EOFException");
+         } catch (EOFException expected) {
+         }
+     }
+ 
++    @Test
++    public void acceptsAFrameOfExactlyTheMaximumLength() throws IOException {
++        // The positive side of the size check. An off-by-one here would be
++        // invisible in normal traffic and would only bite on the one frame
++        // that is exactly at the limit - which is precisely the frame
++        // SnapshotCodec.encodeWithinFrame aims to produce when it shrinks.
++        byte[] body = new byte[FrameCodec.MAX_BODY_BYTES];
++        byte[] encoded = framed(MessageType.SNAPSHOT, body);
++
++        // 4 length bytes plus the frame itself, which is MAX_FRAME_BYTES.
++        assertEquals(4 + Protocol.MAX_FRAME_BYTES, encoded.length);
++        assertArrayEquals(body, FrameCodec.read(new ByteArrayInputStream(encoded)).body);
++    }
++
++    @Test
++    public void refusesToWriteABodyOneByteOverTheLimit() {
++        try {
++            FrameCodec.write(new ByteArrayOutputStream(), MessageType.SNAPSHOT,
++                    new byte[FrameCodec.MAX_BODY_BYTES + 1]);
++            fail("expected ProtocolException");
++        } catch (IOException expected) {
++        }
++    }
++
+     @Test
+     public void refusesToWriteAnOversizedBody() {
+         try {
+             FrameCodec.write(new ByteArrayOutputStream(), MessageType.SNAPSHOT,
+                     new byte[Protocol.MAX_FRAME_BYTES]);
+             fail("expected ProtocolException");
+         } catch (IOException expected) {
+             // Catching it at the sender gives a far better diagnostic than
+             // letting the receiver reject it after a round trip.
+         }
+diff --git a/wire/src/test/java/dev/erinlkolp/glassnotify/wire/SnapshotCodecTest.java b/wire/src/test/java/dev/erinlkolp/glassnotify/wire/SnapshotCodecTest.java
+index d0858b7..49f48e1 100644
+--- a/wire/src/test/java/dev/erinlkolp/glassnotify/wire/SnapshotCodecTest.java
++++ b/wire/src/test/java/dev/erinlkolp/glassnotify/wire/SnapshotCodecTest.java
+@@ -48,38 +48,112 @@ public class SnapshotCodecTest {
+             items.add(item("key-" + i, Tier.QUEUE));
+         }
+ 
+         Snapshot decoded = SnapshotCodec.decode(SnapshotCodec.encode(new Snapshot(1L, items)));
+ 
+         for (int i = 0; i < Protocol.MAX_ITEMS; i++) {
+             assertEquals("key-" + i, decoded.items.get(i).key);
+         }
+     }
+ 
++    /** A string of exactly {@code length} copies of {@code c}. */
++    private static String repeat(char c, int length) {
++        StringBuilder builder = new StringBuilder(length);
++        for (int i = 0; i < length; i++) {
++            builder.append(c);
++        }
++        return builder.toString();
++    }
++
++    /** MAX_ITEMS items with every single field at its cap. */
++    private static Snapshot worstCase(char fill) {
++        List<NotificationItem> items = new ArrayList<NotificationItem>();
++        for (int i = 0; i < Protocol.MAX_ITEMS; i++) {
++            items.add(new NotificationItem(
++                    repeat(fill, Protocol.MAX_KEY_CHARS),
++                    repeat(fill, Protocol.MAX_APP_LABEL_CHARS),
++                    repeat(fill, Protocol.MAX_TITLE_CHARS),
++                    repeat(fill, Protocol.MAX_TEXT_CHARS),
++                    1785870000000L, Tier.QUEUE));
++        }
++        return new Snapshot(1L, items);
++    }
++
+     @Test
+     public void aFullSnapshotFitsComfortablyInOneFrame() throws IOException {
+-        // Spec section 6 claims roughly 3KB. If that assumption ever breaks,
+-        // the snapshot-per-change design needs revisiting, so assert it.
++        // Every field at its cap, not just the body: key and appLabel come
++        // from app-controlled strings, so a test that pins them at "key-3" and
++        // "Signal" proves nothing about the real ceiling. If this assumption
++        // ever breaks, the snapshot-per-change design needs revisiting.
++        int size = SnapshotCodec.encode(worstCase('x')).length;
++
++        assertTrue("worst-case snapshot was " + size + " bytes", size < 16 * 1024);
++        assertTrue(size <= FrameCodec.MAX_BODY_BYTES);
++    }
++
++    @Test
++    public void aFullSnapshotOfMultiByteTextStillFitsInOneFrame() throws IOException {
++        // writeUTF spends three bytes on a BMP character outside Latin-1, so
++        // the caps are measured in chars but the frame limit is in bytes. A
++        // queue full of CJK is the genuine worst case.
++        // Escaped rather than literal so the test does not depend on the
++        // compiler's source encoding.
++        int size = SnapshotCodec.encode(worstCase('\u4e2d')).length;
++
++        assertTrue("multi-byte worst case was " + size + " bytes",
++                size <= FrameCodec.MAX_BODY_BYTES);
++    }
++
++    @Test
++    public void encodeWithinFrameLeavesAFittingSnapshotAlone() throws IOException {
++        Snapshot original = worstCase('x');
++
++        Snapshot decoded = SnapshotCodec.decode(SnapshotCodec.encodeWithinFrame(original));
++
++        assertEquals(Protocol.MAX_ITEMS, decoded.items.size());
++    }
++
++    @Test
++    public void encodeWithinFrameDropsTheOldestItemsUntilItFits() throws IOException {
++        // Bypasses the phone's per-field caps deliberately: this is the guard
++        // that stops an oversized snapshot becoming a permanent reconnect loop.
++        String huge = repeat('x', 40_000);
+         List<NotificationItem> items = new ArrayList<NotificationItem>();
+-        StringBuilder text = new StringBuilder();
+-        for (int i = 0; i < Protocol.MAX_TEXT_CHARS; i++) {
+-            text.append('x');
+-        }
+-        for (int i = 0; i < Protocol.MAX_ITEMS; i++) {
++        for (int i = 0; i < 4; i++) {
+             items.add(new NotificationItem("key-" + i, "Signal", "Jordan Reyes",
+-                    text.toString(), 1785870000000L, Tier.QUEUE));
++                    huge, 1785870000000L, Tier.QUEUE));
+         }
+ 
+-        int size = SnapshotCodec.encode(new Snapshot(1L, items)).length;
++        byte[] encoded = SnapshotCodec.encodeWithinFrame(new Snapshot(7L, items));
++
++        assertTrue(encoded.length <= FrameCodec.MAX_BODY_BYTES);
++        Snapshot decoded = SnapshotCodec.decode(encoded);
++        assertEquals(7L, decoded.snapshotId);
++        // Newest survive, oldest go: only "key-0" fits at 40KB apiece.
++        assertEquals(1, decoded.items.size());
++        assertEquals("key-0", decoded.items.get(0).key);
++    }
++
++    @Test
++    public void encodeWithinFrameSurvivesASingleUnsendableItem() throws IOException {
++        // Even one item can be too big. Dropping to empty beats throwing:
++        // Glass showing "Nothing waiting" is recoverable, a wedged link is not.
++        List<NotificationItem> items = new ArrayList<NotificationItem>();
++        // writeUTF itself caps a single string at 65535 bytes, so it takes two
++        // large fields to push one item past the frame limit on its own.
++        items.add(new NotificationItem("k", "Signal", repeat('x', 1_000),
++                repeat('x', 65_000), 1785870000000L, Tier.QUEUE));
++
++        byte[] encoded = SnapshotCodec.encodeWithinFrame(new Snapshot(1L, items));
+ 
+-        assertTrue("worst-case snapshot was " + size + " bytes", size < 8 * 1024);
+-        assertTrue(size < Protocol.MAX_FRAME_BYTES);
++        assertTrue(encoded.length <= FrameCodec.MAX_BODY_BYTES);
++        assertEquals(0, SnapshotCodec.decode(encoded).items.size());
+     }
+ 
+     @Test
+     public void rejectsAnItemCountOverTheCap() throws IOException {
+         ByteArrayOutputStream raw = new ByteArrayOutputStream();
+         DataOutputStream d = new DataOutputStream(raw);
+         d.writeLong(1L);
+         d.writeShort(Protocol.MAX_ITEMS + 1);
+ 
+         try {

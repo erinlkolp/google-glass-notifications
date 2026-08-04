@@ -1,0 +1,121 @@
+# Review package: 8f11b37e3db7e6d50fdd100ba9024cbf69fcbd43..fc13b96
+
+## Commits
+fc13b96 build: suppress javac's own obsolete source/target 8 warnings
+7137e1e docs: add the Java 8 warning suppression to the plan's gradle.properties
+5c23207 build: suppress AGP's Java 8 source/target deprecation warning
+
+## Files changed
+ docs/superpowers/plans/2026-08-04-glass-notifications.md | 5 +++++
+ glass/build.gradle.kts                                   | 6 ++++++
+ gradle.properties                                        | 4 ++++
+ phone/build.gradle.kts                                   | 6 ++++++
+ wire/build.gradle.kts                                    | 7 ++++++-
+ 5 files changed, 27 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/docs/superpowers/plans/2026-08-04-glass-notifications.md b/docs/superpowers/plans/2026-08-04-glass-notifications.md
+index 814ea18..934653f 100644
+--- a/docs/superpowers/plans/2026-08-04-glass-notifications.md
++++ b/docs/superpowers/plans/2026-08-04-glass-notifications.md
+@@ -155,20 +155,25 @@ plugins {
+     id("com.android.application") version "8.7.0" apply false
+ }
+ ```
+ 
+ `gradle.properties`:
+ 
+ ```properties
+ org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+ android.useAndroidX=false
+ org.gradle.parallel=true
++
++# The Java 8 source/target is deliberate and load-bearing - the Glass device is
++# API 22 - so JDK 21's warning about it is noise about a decision that is not
++# going to change.
++android.javaCompile.suppressSourceTargetDeprecationWarning=true
+ ```
+ 
+ `wire/build.gradle.kts`:
+ 
+ ```kotlin
+ plugins { id("java-library") }
+ 
+ java {
+     sourceCompatibility = JavaVersion.VERSION_1_8
+     targetCompatibility = JavaVersion.VERSION_1_8
+diff --git a/glass/build.gradle.kts b/glass/build.gradle.kts
+index 34b18c7..8ef8c94 100644
+--- a/glass/build.gradle.kts
++++ b/glass/build.gradle.kts
+@@ -23,10 +23,16 @@ android {
+ 
+     buildTypes {
+         release { isMinifyEnabled = false }
+     }
+ }
+ 
+ dependencies {
+     implementation(project(":wire"))
+     testImplementation("junit:junit:4.13.2")
+ }
++
++// Source/target 8 is pinned for the life of the project - the Glass device is
++// API 22 - so javac's "obsolete" advice to move off it is not actionable.
++tasks.withType<JavaCompile>().configureEach {
++    options.compilerArgs.add("-Xlint:-options")
++}
+diff --git a/gradle.properties b/gradle.properties
+index d5e1a4c..40ba792 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -1,3 +1,7 @@
+ org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+ android.useAndroidX=false
++# Java 8 source/target is deliberate and load-bearing: the Glass device runs
++# API 22, which caps us there. JDK 21's warning about compiling for source/
++# target 8 is noise about a decision that is not going to change.
++android.javaCompile.suppressSourceTargetDeprecationWarning=true
+ org.gradle.parallel=true
+diff --git a/phone/build.gradle.kts b/phone/build.gradle.kts
+index e1b73af..bfadbd5 100644
+--- a/phone/build.gradle.kts
++++ b/phone/build.gradle.kts
+@@ -19,10 +19,16 @@ android {
+ 
+     buildTypes {
+         release { isMinifyEnabled = false }
+     }
+ }
+ 
+ dependencies {
+     implementation(project(":wire"))
+     testImplementation("junit:junit:4.13.2")
+ }
++
++// Source/target 8 is pinned for the life of the project - the Glass device is
++// API 22 - so javac's "obsolete" advice to move off it is not actionable.
++tasks.withType<JavaCompile>().configureEach {
++    options.compilerArgs.add("-Xlint:-options")
++}
+diff --git a/wire/build.gradle.kts b/wire/build.gradle.kts
+index 2cbd24e..387bacd 100644
+--- a/wire/build.gradle.kts
++++ b/wire/build.gradle.kts
+@@ -1,10 +1,15 @@
+ plugins { id("java-library") }
+ 
+ java {
+     sourceCompatibility = JavaVersion.VERSION_1_8
+     targetCompatibility = JavaVersion.VERSION_1_8
+ }
+ 
+-tasks.withType<JavaCompile>().configureEach { options.release.set(8) }
++// Source/target 8 is pinned for the life of the project - the Glass device is
++// API 22 - so javac's "obsolete" advice to move off it is not actionable.
++tasks.withType<JavaCompile>().configureEach {
++    options.release.set(8)
++    options.compilerArgs.add("-Xlint:-options")
++}
+ 
+ dependencies { testImplementation("junit:junit:4.13.2") }

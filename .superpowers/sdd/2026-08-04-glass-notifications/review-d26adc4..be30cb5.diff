@@ -1,0 +1,477 @@
+# Review package: d26adc4c5fbd4ada92ed36465881ff0deb8c97db..be30cb5
+
+## Commits
+be30cb5 feat(phone): add notification listener, allowlist and snapshot bus
+
+## Files changed
+ phone/src/main/AndroidManifest.xml                 | 13 +++-
+ .../dev/erinlkolp/glassnotify/phone/AllowRule.java | 21 ------
+ .../glassnotify/phone/AllowlistStore.java          | 85 ++++++++++++++++++++++
+ .../glassnotify/phone/GlassNotifyPrefs.java        | 10 +++
+ .../glassnotify/phone/NotifyListenerService.java   | 74 +++++++++++++++++++
+ .../dev/erinlkolp/glassnotify/phone/SbnMapper.java | 60 +++++++++++++++
+ .../erinlkolp/glassnotify/phone/SnapshotBus.java   | 72 ++++++++++++++++++
+ .../glassnotify/phone/AllowlistCodecTest.java      | 66 +++++++++++++++++
+ 8 files changed, 379 insertions(+), 22 deletions(-)
+
+## Diff
+diff --git a/phone/src/main/AndroidManifest.xml b/phone/src/main/AndroidManifest.xml
+index b41a1d8..b8fc0fa 100644
+--- a/phone/src/main/AndroidManifest.xml
++++ b/phone/src/main/AndroidManifest.xml
+@@ -2,13 +2,24 @@
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+ 
+     <uses-permission android:name="android.permission.BLUETOOTH" />
+     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+ 
+     <application
+         android:allowBackup="false"
+-        android:label="@string/app_name" />
++        android:label="@string/app_name">
++
++        <service
++            android:name=".NotifyListenerService"
++            android:exported="true"
++            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
++            <intent-filter>
++                <action android:name="android.service.notification.NotificationListenerService" />
++            </intent-filter>
++        </service>
++
++    </application>
+ 
+ </manifest>
+diff --git a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/AllowRule.java b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/AllowRule.java
+deleted file mode 100644
+index 69fd445..0000000
+--- a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/AllowRule.java
++++ /dev/null
+@@ -1,21 +0,0 @@
+-package dev.erinlkolp.glassnotify.phone;
+-
+-import dev.erinlkolp.glassnotify.wire.Tier;
+-
+-/** One allowlist entry: this package, shown at this tier. */
+-public final class AllowRule {
+-
+-    public final String packageName;
+-    public final Tier tier;
+-
+-    public AllowRule(String packageName, Tier tier) {
+-        if (packageName == null) {
+-            throw new NullPointerException("packageName");
+-        }
+-        if (tier == null) {
+-            throw new NullPointerException("tier");
+-        }
+-        this.packageName = packageName;
+-        this.tier = tier;
+-    }
+-}
+diff --git a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/AllowlistStore.java b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/AllowlistStore.java
+new file mode 100644
+index 0000000..65c1c8b
+--- /dev/null
++++ b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/AllowlistStore.java
+@@ -0,0 +1,85 @@
++package dev.erinlkolp.glassnotify.phone;
++
++import android.content.SharedPreferences;
++
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.Map;
++import java.util.Set;
++
++import dev.erinlkolp.glassnotify.wire.Tier;
++
++/**
++ * Persists which packages are shown, and at what tier.
++ *
++ * Stored as a SharedPreferences string set of "packageName|tierCode" so the
++ * encoding is inspectable and testable without an Android runtime.
++ */
++public final class AllowlistStore {
++
++    private static final String KEY_RULES = "allowlist_rules";
++    private static final char SEPARATOR = '|';
++
++    private final SharedPreferences prefs;
++
++    public AllowlistStore(SharedPreferences prefs) {
++        if (prefs == null) {
++            throw new NullPointerException("prefs");
++        }
++        this.prefs = prefs;
++    }
++
++    public Map<String, Tier> rules() {
++        return decode(prefs.getStringSet(KEY_RULES, null));
++    }
++
++    public void put(String packageName, Tier tier) {
++        Map<String, Tier> rules = rules();
++        rules.put(packageName, tier);
++        save(rules);
++    }
++
++    public void remove(String packageName) {
++        Map<String, Tier> rules = rules();
++        rules.remove(packageName);
++        save(rules);
++    }
++
++    private void save(Map<String, Tier> rules) {
++        prefs.edit().putStringSet(KEY_RULES, encode(rules)).apply();
++    }
++
++    static Set<String> encode(Map<String, Tier> rules) {
++        Set<String> encoded = new HashSet<String>();
++        for (Map.Entry<String, Tier> entry : rules.entrySet()) {
++            encoded.add(entry.getKey() + SEPARATOR + entry.getValue().code);
++        }
++        return encoded;
++    }
++
++    static Map<String, Tier> decode(Set<String> raw) {
++        Map<String, Tier> rules = new HashMap<String, Tier>();
++        if (raw == null) {
++            return rules;
++        }
++        for (String entry : raw) {
++            int split = entry.lastIndexOf(SEPARATOR);
++            if (split <= 0 || split == entry.length() - 1) {
++                // No separator, or nothing on one side of it. Skip rather than
++                // throw: a corrupt preference must not stop the service booting.
++                continue;
++            }
++            String packageName = entry.substring(0, split);
++            Tier tier;
++            try {
++                tier = Tier.fromCode(Integer.parseInt(entry.substring(split + 1)));
++            } catch (NumberFormatException e) {
++                continue;
++            }
++            if (tier != null) {
++                rules.put(packageName, tier);
++            }
++        }
++        return rules;
++    }
++}
+diff --git a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/GlassNotifyPrefs.java b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/GlassNotifyPrefs.java
+new file mode 100644
+index 0000000..9ef122d
+--- /dev/null
++++ b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/GlassNotifyPrefs.java
+@@ -0,0 +1,10 @@
++package dev.erinlkolp.glassnotify.phone;
++
++/** Single source of truth for the SharedPreferences file name. */
++public final class GlassNotifyPrefs {
++
++    public static final String NAME = "glassnotify";
++
++    private GlassNotifyPrefs() {
++    }
++}
+diff --git a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/NotifyListenerService.java b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/NotifyListenerService.java
+new file mode 100644
+index 0000000..de34f05
+--- /dev/null
++++ b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/NotifyListenerService.java
+@@ -0,0 +1,74 @@
++package dev.erinlkolp.glassnotify.phone;
++
++import android.content.Context;
++import android.service.notification.NotificationListenerService;
++import android.service.notification.StatusBarNotification;
++import android.util.Log;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++
++import dev.erinlkolp.glassnotify.wire.Snapshot;
++import dev.erinlkolp.glassnotify.wire.Tier;
++
++/**
++ * Observes system notifications and republishes the whole current state.
++ *
++ * Bound and revived by the system automatically once notification access is
++ * granted. Every callback rebuilds the entire snapshot rather than tracking
++ * deltas, which is what makes the transport idempotent. Spec section 6.
++ */
++public final class NotifyListenerService extends NotificationListenerService {
++
++    private static final String TAG = "GlassNotify";
++
++    private long sequence;
++
++    @Override
++    public void onListenerConnected() {
++        super.onListenerConnected();
++        // getActiveNotifications is only valid once connected, so this is the
++        // first point at which a complete snapshot can be built.
++        republish();
++        // Task 11 adds the LinkClientService.start(this) call here, once that
++        // class exists. Publishing to the bus is useful on its own until then.
++    }
++
++    @Override
++    public void onNotificationPosted(StatusBarNotification sbn) {
++        republish();
++    }
++
++    @Override
++    public void onNotificationRemoved(StatusBarNotification sbn) {
++        // Removals matter as much as posts: without them the Glass queue rots
++        // within a day. Spec section 6.
++        republish();
++    }
++
++    private void republish() {
++        StatusBarNotification[] active;
++        try {
++            active = getActiveNotifications();
++        } catch (SecurityException e) {
++            // Access was revoked underneath us.
++            Log.w(TAG, "notification access unavailable", e);
++            return;
++        }
++        if (active == null) {
++            return;
++        }
++
++        List<SourceNotification> sources = new ArrayList<SourceNotification>(active.length);
++        for (StatusBarNotification sbn : active) {
++            sources.add(SbnMapper.map(sbn, getPackageManager()));
++        }
++
++        Map<String, Tier> rules = new AllowlistStore(
++                getSharedPreferences(GlassNotifyPrefs.NAME, Context.MODE_PRIVATE)).rules();
++
++        Snapshot snapshot = SnapshotBuilder.build(++sequence, sources, rules);
++        SnapshotBus.get().publish(snapshot);
++    }
++}
+diff --git a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/SbnMapper.java b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/SbnMapper.java
+new file mode 100644
+index 0000000..77fa44b
+--- /dev/null
++++ b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/SbnMapper.java
+@@ -0,0 +1,60 @@
++package dev.erinlkolp.glassnotify.phone;
++
++import android.app.Notification;
++import android.content.pm.ApplicationInfo;
++import android.content.pm.PackageManager;
++import android.os.Bundle;
++import android.service.notification.StatusBarNotification;
++
++/**
++ * The single place StatusBarNotification is touched.
++ *
++ * Everything downstream operates on SourceNotification, which has no Android
++ * types and is therefore testable on the host. Spec section 12.2.
++ */
++public final class SbnMapper {
++
++    private SbnMapper() {
++    }
++
++    public static SourceNotification map(StatusBarNotification sbn, PackageManager packages) {
++        Notification notification = sbn.getNotification();
++        Bundle extras = notification == null ? null : notification.extras;
++
++        String title = extras == null ? null : charSequence(extras, Notification.EXTRA_TITLE);
++        String text = extras == null ? null : charSequence(extras, Notification.EXTRA_TEXT);
++
++        if (text == null && extras != null) {
++            // Big-text style puts the body here instead.
++            text = charSequence(extras, Notification.EXTRA_BIG_TEXT);
++        }
++
++        boolean ongoing = notification != null
++                && (notification.flags & Notification.FLAG_ONGOING_EVENT) != 0;
++
++        return new SourceNotification(
++                sbn.getKey(),
++                sbn.getPackageName(),
++                appLabel(sbn.getPackageName(), packages),
++                title,
++                text,
++                sbn.getPostTime(),
++                ongoing);
++    }
++
++    private static String charSequence(Bundle extras, String key) {
++        CharSequence value = extras.getCharSequence(key);
++        return value == null ? null : value.toString();
++    }
++
++    /** Falls back to the package name, which is ugly but never wrong. */
++    private static String appLabel(String packageName, PackageManager packages) {
++        try {
++            ApplicationInfo info = packages.getApplicationInfo(packageName, 0);
++            CharSequence label = packages.getApplicationLabel(info);
++            return label == null ? packageName : label.toString();
++        } catch (PackageManager.NameNotFoundException e) {
++            return packageName;
++        }
++    }
++}
+diff --git a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/SnapshotBus.java b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/SnapshotBus.java
+new file mode 100644
+index 0000000..db37246
+--- /dev/null
++++ b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/SnapshotBus.java
+@@ -0,0 +1,72 @@
++package dev.erinlkolp.glassnotify.phone;
++
++import android.os.Handler;
++import android.os.Looper;
++
++import java.util.ArrayList;
++
++import dev.erinlkolp.glassnotify.wire.NotificationItem;
++import dev.erinlkolp.glassnotify.wire.Snapshot;
++
++/**
++ * Carries snapshots from the listener service to the link service, debouncing
++ * on the way.
++ *
++ * A single group message can fire several onNotificationPosted callbacks in a
++ * burst. Coalescing them into one snapshot is the second big battery lever
++ * after phone-side filtering. Spec section 10.2.
++ */
++public final class SnapshotBus {
++
++    /** Spec section 10.2. */
++    public static final long DEBOUNCE_MS = 500L;
++
++    public interface Listener {
++        void onSnapshot(Snapshot snapshot);
++    }
++
++    private static final SnapshotBus INSTANCE = new SnapshotBus();
++
++    private final Handler handler = new Handler(Looper.getMainLooper());
++
++    private volatile Snapshot latest =
++            new Snapshot(0L, new ArrayList<NotificationItem>());
++    private volatile Listener listener;
++    private boolean pending;
++
++    private final Runnable deliver = new Runnable() {
++        @Override
++        public void run() {
++            pending = false;
++            Listener target = listener;
++            if (target != null) {
++                target.onSnapshot(latest);
++            }
++        }
++    };
++
++    private SnapshotBus() {
++    }
++
++    public static SnapshotBus get() {
++        return INSTANCE;
++    }
++
++    /** Never null. The link service sends this on connect. */
++    public Snapshot latest() {
++        return latest;
++    }
++
++    public void setListener(Listener listener) {
++        this.listener = listener;
++    }
++
++    /** Replaces the current snapshot and schedules a debounced delivery. */
++    public void publish(Snapshot snapshot) {
++        latest = snapshot;
++        if (!pending) {
++            pending = true;
++            handler.postDelayed(deliver, DEBOUNCE_MS);
++        }
++    }
++}
+diff --git a/phone/src/test/java/dev/erinlkolp/glassnotify/phone/AllowlistCodecTest.java b/phone/src/test/java/dev/erinlkolp/glassnotify/phone/AllowlistCodecTest.java
+new file mode 100644
+index 0000000..a61a7df
+--- /dev/null
++++ b/phone/src/test/java/dev/erinlkolp/glassnotify/phone/AllowlistCodecTest.java
+@@ -0,0 +1,66 @@
++package dev.erinlkolp.glassnotify.phone;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.Map;
++import java.util.Set;
++
++import org.junit.Test;
++
++import dev.erinlkolp.glassnotify.wire.Tier;
++
++public class AllowlistCodecTest {
++
++    @Test
++    public void roundTripsRules() {
++        Map<String, Tier> rules = new HashMap<String, Tier>();
++        rules.put("org.thoughtcrime.securesms", Tier.INTERRUPT);
++        rules.put("com.slack", Tier.QUEUE);
++
++        Map<String, Tier> decoded = AllowlistStore.decode(AllowlistStore.encode(rules));
++
++        assertEquals(2, decoded.size());
++        assertEquals(Tier.INTERRUPT, decoded.get("org.thoughtcrime.securesms"));
++        assertEquals(Tier.QUEUE, decoded.get("com.slack"));
++    }
++
++    @Test
++    public void roundTripsAnEmptyMap() {
++        assertTrue(AllowlistStore.decode(AllowlistStore.encode(new HashMap<String, Tier>())).isEmpty());
++    }
++
++    @Test
++    public void skipsMalformedEntriesRatherThanThrowing() {
++        // A hand-edited or half-migrated preference must not crash the listener
++        // service on boot.
++        Set<String> raw = new HashSet<String>();
++        raw.add("org.thoughtcrime.securesms|1");
++        raw.add("garbage-with-no-separator");
++        raw.add("com.example|999");
++        raw.add("|1");
++
++        Map<String, Tier> decoded = AllowlistStore.decode(raw);
++
++        assertEquals(1, decoded.size());
++        assertEquals(Tier.INTERRUPT, decoded.get("org.thoughtcrime.securesms"));
++    }
++
++    @Test
++    public void toleratesNullFromSharedPreferences() {
++        assertTrue(AllowlistStore.decode(null).isEmpty());
++    }
++
++    @Test
++    public void packageNamesContainingTheSeparatorDoNotCorruptTheSet() {
++        // Package names cannot contain '|', but proving the split is anchored
++        // to the last separator costs nothing and documents the assumption.
++        Map<String, Tier> rules = new HashMap<String, Tier>();
++        rules.put("com.example.app", Tier.QUEUE);
++
++        assertEquals(Tier.QUEUE,
++                AllowlistStore.decode(AllowlistStore.encode(rules)).get("com.example.app"));
++    }
++}

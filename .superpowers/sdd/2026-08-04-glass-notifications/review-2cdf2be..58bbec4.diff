@@ -1,0 +1,291 @@
+# Review package: 2cdf2be..58bbec4
+
+## Commits
+58bbec4 fix(phone): stop a notification from truncating the connect backoff
+38ac87f fix(wire): guard the first encode attempt in encodeWithinFrame too
+
+## Files changed
+ .../glassnotify/phone/LinkClientService.java       | 52 +++++++++++++++-----
+ .../erinlkolp/glassnotify/wire/SnapshotCodec.java  | 44 ++++++++++++-----
+ .../glassnotify/wire/SnapshotCodecTest.java        | 57 ++++++++++++++++++++++
+ 3 files changed, 129 insertions(+), 24 deletions(-)
+
+## Diff
+diff --git a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java
+index be00bcf..4181c5f 100644
+--- a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java
++++ b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java
+@@ -357,57 +357,87 @@ public final class LinkClientService extends Service implements SnapshotBus.List
+     }
+ 
+     /**
+      * Sleeps between connection attempts, but returns early if wake() is
+      * called - including a wake() that arrived just before this method was
+      * entered, e.g. while status() was busy on a Binder call to
+      * NotificationManager. Without the flag, that notifyAll() would land with
+      * nobody waiting and be lost, forcing the full stale backoff to run out
+      * regardless.
+      *
+-     * Deliberately not woken by a pending snapshot. A chatty notification
+-     * stream must not be able to shorten the reconnect backoff, or the retry
+-     * cadence would be set by how much mail arrives.
++     * Deliberately not shortened by a pending snapshot - and that takes a
++     * condition loop, not just the absence of a snapshotPending check.
++     * {@link #onSnapshot} signals this same monitor, and {@code
++     * Object.wait(long)} returns identically on a timeout and on a notify, so a
++     * bare {@code wait(ms)} cannot tell the two apart: it falls through on the
++     * first notification to arrive. That hands the reconnect cadence to the
++     * notification stream - every post or removal becomes an RFCOMM connect
++     * attempt - and the exponential backoff never engages at all.
++     *
++     * So the loop below re-checks a condition rather than trusting the return.
++     * Only {@link #wakeRequested} (a real {@code wake()}) or {@code !running}
++     * (teardown) ends the wait early, and both are latched flags, so neither can
++     * be missed by arriving a moment before the wait is entered. Every other
++     * wakeup recomputes the time still owed and parks again.
++     *
++     * The deadline is on {@link SystemClock#elapsedRealtime}, not
++     * {@code System.currentTimeMillis()}, so a clock adjustment mid-wait can
++     * neither stretch the remaining time nor collapse it to zero.
+      */
+     private void waitForWake(long ms) {
++        long deadline = SystemClock.elapsedRealtime() + ms;
+         synchronized (wakeLock) {
+-            if (wakeRequested) {
+-                wakeRequested = false;
+-                return;
+-            }
+-            if (running && ms > 0) {
+-                // wait(0) waits forever; ms is always positive here, but the
+-                // guard keeps that from becoming a hang if it ever is not.
++            while (running && !wakeRequested) {
++                long remaining = deadline - SystemClock.elapsedRealtime();
++                if (remaining <= 0) {
++                    break;
++                }
++                // wait(0) waits forever; the check above is what rules it out.
+                 try {
+-                    wakeLock.wait(ms);
++                    wakeLock.wait(remaining);
+                 } catch (InterruptedException e) {
+                     Thread.currentThread().interrupt();
++                    break;
+                 }
+             }
+             wakeRequested = false;
+         }
+     }
+ 
+     /**
+      * Parks the worker until the next PING is due, a snapshot needs sending,
+      * or the service is going away. Returns true if a snapshot is waiting,
+      * consuming the flag.
++     *
++     * No deadline loop here, unlike {@link #waitForWake}. {@link #pump} tracks
++     * an absolute {@code nextPingAt} and re-enters this method with whatever
++     * time is left, so an early return costs one extra pass round a loop that
++     * then finds nothing to do - it cannot shorten the heartbeat interval.
++     *
++     * Both flags are consumed on the way out. {@code wakeRequested} means "cut
++     * the connect backoff short", and inside a live session there is no backoff
++     * to cut; leaving it set would carry it past the end of this session into
++     * the first {@link #waitForWake} after the link drops, which would then
++     * return instantly and skip a whole backoff interval. Consuming it here is
++     * what the pre-single-writer wait did, and it keeps the flag meaning one
++     * thing: nobody has acted on the wake yet.
+      */
+     private boolean awaitWork(long ms) {
+         synchronized (wakeLock) {
+             if (running && !snapshotPending && ms > 0) {
+                 try {
+                     wakeLock.wait(ms);
+                 } catch (InterruptedException e) {
+                     Thread.currentThread().interrupt();
+                 }
+             }
++            wakeRequested = false;
+             boolean pending = snapshotPending;
+             snapshotPending = false;
+             return pending;
+         }
+     }
+ 
+     /** Clears any pending flag without acting on it. */
+     private void clearPendingSnapshot() {
+         synchronized (wakeLock) {
+             snapshotPending = false;
+diff --git a/wire/src/main/java/dev/erinlkolp/glassnotify/wire/SnapshotCodec.java b/wire/src/main/java/dev/erinlkolp/glassnotify/wire/SnapshotCodec.java
+index fe0e6cc..9817178 100644
+--- a/wire/src/main/java/dev/erinlkolp/glassnotify/wire/SnapshotCodec.java
++++ b/wire/src/main/java/dev/erinlkolp/glassnotify/wire/SnapshotCodec.java
+@@ -1,17 +1,18 @@
+ package dev.erinlkolp.glassnotify.wire;
+ 
+ import java.io.ByteArrayInputStream;
+ import java.io.ByteArrayOutputStream;
+ import java.io.DataInputStream;
+ import java.io.DataOutputStream;
+ import java.io.IOException;
++import java.io.UTFDataFormatException;
+ import java.util.ArrayList;
+ import java.util.List;
+ 
+ /**
+  * Encodes and decodes the SNAPSHOT frame body.
+  *
+  * <pre>
+  * int64   snapshotId
+  * int16   itemCount
+  * repeated itemCount times:
+@@ -59,39 +60,56 @@ public final class SnapshotCodec {
+      * impossible, but "should" is not a guarantee against input the phone does
+      * not control. If an oversized snapshot ever did reach the writer, the
+      * failure mode without this is unrecoverable rather than merely lossy:
+      * FrameCodec.write throws, the sender drops the link, reconnects, and the
+      * handshake re-sends the identical snapshot - a reconnect loop that never
+      * self-heals and presents as "phone connected, Glass blank". Losing the
+      * tail of the queue is strictly better than that.
+      *
+      * Items are newest-first, so the oldest is the last one - which is also
+      * the one the wearer is least likely to be looking for.
++     *
++     * Every attempt is inside the loop, including the first. Being oversized is
++     * not the only way {@link #encode} can fail: a single field over 65535 UTF-8
++     * bytes raises {@code UTFDataFormatException} from {@code writeUTF}, and
++     * more than {@link Protocol#MAX_ITEMS} items raises {@link
++     * ProtocolException}. Both are {@code IOException}s, so an unguarded first
++     * attempt would throw one straight at the writer - and that lands in exactly
++     * the unrecoverable loop this method exists to prevent, since the reconnect
++     * re-sends the identical snapshot. {@code SnapshotBuilder} caps every field
++     * and the item count, so none of this is reachable today; it is the second
++     * layer, and a second layer with a hole in it is not one.
+      */
+     public static byte[] encodeWithinFrame(Snapshot snapshot) throws IOException {
+-        byte[] encoded = encode(snapshot);
+-        if (encoded.length <= FrameCodec.MAX_BODY_BYTES) {
+-            return encoded;
+-        }
+-
+         List<NotificationItem> items =
+                 new ArrayList<NotificationItem>(snapshot.items);
+-        while (!items.isEmpty()) {
+-            items.remove(items.size() - 1);
+-            encoded = encode(new Snapshot(snapshot.snapshotId, items));
+-            if (encoded.length <= FrameCodec.MAX_BODY_BYTES) {
+-                return encoded;
++        while (true) {
++            try {
++                byte[] encoded = encode(new Snapshot(snapshot.snapshotId, items));
++                if (encoded.length <= FrameCodec.MAX_BODY_BYTES) {
++                    return encoded;
++                }
++            } catch (ProtocolException tooMany) {
++                // Over MAX_ITEMS. Dropping the tail is the same remedy.
++            } catch (UTFDataFormatException tooLong) {
++                // One field past writeUTF's own 65535-byte ceiling.
++            }
++            if (items.isEmpty()) {
++                // An empty snapshot is a fixed ten bytes and has no strings to
++                // overflow, so it always encodes and always fits: this is
++                // unreachable. Kept so the loop provably terminates rather
++                // than indexing off the end of an empty list.
++                throw new ProtocolException(
++                        "snapshot " + snapshot.snapshotId + " will not encode even when empty");
+             }
++            items.remove(items.size() - 1);
+         }
+-        // An empty snapshot is a fixed ten bytes, so the loop above always
+-        // returns before falling through. Kept so the compiler agrees.
+-        return encoded;
+     }
+ 
+     public static Snapshot decode(byte[] body) throws IOException {
+         DataInputStream in = new DataInputStream(new ByteArrayInputStream(body));
+ 
+         long snapshotId = in.readLong();
+         int count = in.readShort();
+         if (count < 0 || count > Protocol.MAX_ITEMS) {
+             throw new ProtocolException("snapshot declares " + count
+                     + " items, outside 0.." + Protocol.MAX_ITEMS);
+diff --git a/wire/src/test/java/dev/erinlkolp/glassnotify/wire/SnapshotCodecTest.java b/wire/src/test/java/dev/erinlkolp/glassnotify/wire/SnapshotCodecTest.java
+index 49f48e1..7235388 100644
+--- a/wire/src/test/java/dev/erinlkolp/glassnotify/wire/SnapshotCodecTest.java
++++ b/wire/src/test/java/dev/erinlkolp/glassnotify/wire/SnapshotCodecTest.java
+@@ -142,20 +142,77 @@ public class SnapshotCodecTest {
+         // large fields to push one item past the frame limit on its own.
+         items.add(new NotificationItem("k", "Signal", repeat('x', 1_000),
+                 repeat('x', 65_000), 1785870000000L, Tier.QUEUE));
+ 
+         byte[] encoded = SnapshotCodec.encodeWithinFrame(new Snapshot(1L, items));
+ 
+         assertTrue(encoded.length <= FrameCodec.MAX_BODY_BYTES);
+         assertEquals(0, SnapshotCodec.decode(encoded).items.size());
+     }
+ 
++    @Test
++    public void encodeWithinFrameDegradesRatherThanThrowingOverTheItemCap() throws IOException {
++        // encode() rejects more than MAX_ITEMS with a ProtocolException. That
++        // used to escape encodeWithinFrame, because the first encode() call sat
++        // outside the degradation loop - an IOException at the writer, which
++        // drops the link, reconnects, and re-sends the identical snapshot.
++        // Exactly the unrecoverable loop this method exists to prevent.
++        List<NotificationItem> items = new ArrayList<NotificationItem>();
++        for (int i = 0; i < Protocol.MAX_ITEMS + 5; i++) {
++            items.add(item("key-" + i, Tier.QUEUE));
++        }
++
++        Snapshot decoded = SnapshotCodec.decode(
++                SnapshotCodec.encodeWithinFrame(new Snapshot(9L, items)));
++
++        assertEquals(9L, decoded.snapshotId);
++        assertEquals(Protocol.MAX_ITEMS, decoded.items.size());
++        // Newest survive, oldest go - the same tail-first rule as the size path.
++        assertEquals("key-0", decoded.items.get(0).key);
++        assertEquals("key-" + (Protocol.MAX_ITEMS - 1),
++                decoded.items.get(Protocol.MAX_ITEMS - 1).key);
++    }
++
++    @Test
++    public void encodeWithinFrameDegradesRatherThanThrowingOnAnUnencodableField()
++            throws IOException {
++        // writeUTF has its own 65535-byte ceiling and raises
++        // UTFDataFormatException, not an oversized byte[], so the length check
++        // alone never sees this one. It has to be caught, not measured.
++        List<NotificationItem> items = new ArrayList<NotificationItem>();
++        items.add(item("keep-me", Tier.QUEUE));
++        items.add(new NotificationItem("too-big", "Signal", "Jordan Reyes",
++                repeat('x', 70_000), 1785870000000L, Tier.QUEUE));
++
++        byte[] encoded = SnapshotCodec.encodeWithinFrame(new Snapshot(11L, items));
++
++        assertTrue(encoded.length <= FrameCodec.MAX_BODY_BYTES);
++        Snapshot decoded = SnapshotCodec.decode(encoded);
++        assertEquals(1, decoded.items.size());
++        assertEquals("keep-me", decoded.items.get(0).key);
++    }
++
++    @Test
++    public void encodeWithinFrameDropsToEmptyWhenTheNewestItemIsUnencodable()
++            throws IOException {
++        // Nothing is salvageable here: the offending item is the newest, so
++        // degradation runs all the way to empty. Glass showing "Nothing
++        // waiting" is recoverable; a wedged link is not.
++        List<NotificationItem> items = new ArrayList<NotificationItem>();
++        items.add(new NotificationItem("too-big", "Signal", repeat('x', 70_000),
++                "text", 1785870000000L, Tier.QUEUE));
++
++        byte[] encoded = SnapshotCodec.encodeWithinFrame(new Snapshot(12L, items));
++
++        assertEquals(0, SnapshotCodec.decode(encoded).items.size());
++    }
++
+     @Test
+     public void rejectsAnItemCountOverTheCap() throws IOException {
+         ByteArrayOutputStream raw = new ByteArrayOutputStream();
+         DataOutputStream d = new DataOutputStream(raw);
+         d.writeLong(1L);
+         d.writeShort(Protocol.MAX_ITEMS + 1);
+ 
+         try {
+             SnapshotCodec.decode(raw.toByteArray());
+             fail("expected ProtocolException");

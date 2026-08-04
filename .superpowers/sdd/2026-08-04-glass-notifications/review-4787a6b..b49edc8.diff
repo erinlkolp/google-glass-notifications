@@ -1,0 +1,98 @@
+# Review package: 4787a6bb42e3d29b4ecdf2ef4983f420e5e86206..b49edc8
+
+## Commits
+b49edc8 fix(glass): re-derive cursor size from live snapshot state
+
+## Files changed
+ .../erinlkolp/glassnotify/glass/QueueActivity.java  |  6 +++++-
+ .../glassnotify/glass/QueueCursorTest.java          | 21 +++++++++++++++++++++
+ 2 files changed, 26 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/QueueActivity.java b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/QueueActivity.java
+index 1007140..3cdd82d 100644
+--- a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/QueueActivity.java
++++ b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/QueueActivity.java
+@@ -85,40 +85,44 @@ public final class QueueActivity extends Activity {
+                 return true;
+             case MotionEvent.ACTION_UP:
+                 handle(detector.end(sample));
+                 return true;
+             default:
+                 return super.onTouchEvent(event);
+         }
+     }
+ 
+     private void handle(Swipe swipe) {
++        cursor.setSize(store.items().size());
+         boolean moved = false;
+         if (swipe == Swipe.FORWARD) {
+             moved = cursor.next();
+         } else if (swipe == Swipe.BACK) {
+             moved = cursor.previous();
+         }
+         if (moved) {
+             render();
+         }
+     }
+ 
+     private void refresh() {
+-        cursor.setSize(store.items().size());
+         render();
+     }
+ 
+     private void render() {
+         container.removeAllViews();
+ 
++        // Capture once: current is volatile and items is immutable, so this
++        // local cannot change under us even if the service swaps the snapshot.
+         List<NotificationItem> items = store.items();
++        cursor.setSize(items.size());
++
+         if (items.isEmpty()) {
+             container.addView(CardRenderer.messageCard(this, getString(R.string.empty_queue)));
+             return;
+         }
+ 
+         int index = cursor.index();
+         container.addView(CardRenderer.queueCard(this, items.get(index),
+                 index + 1, items.size(), store.isStale()));
+     }
+ }
+diff --git a/glass/src/test/java/dev/erinlkolp/glassnotify/glass/QueueCursorTest.java b/glass/src/test/java/dev/erinlkolp/glassnotify/glass/QueueCursorTest.java
+index e3b707c..9e7a00c 100644
+--- a/glass/src/test/java/dev/erinlkolp/glassnotify/glass/QueueCursorTest.java
++++ b/glass/src/test/java/dev/erinlkolp/glassnotify/glass/QueueCursorTest.java
+@@ -99,11 +99,32 @@ public class QueueCursorTest {
+     }
+ 
+     @Test
+     public void rejectsANegativeSize() {
+         try {
+             cursor.setSize(-1);
+             org.junit.Assert.fail("expected IllegalArgumentException");
+         } catch (IllegalArgumentException expected) {
+         }
+     }
++
++    @Test
++    public void navigatingRightAfterAShrinkStaysInBounds() {
++        // Regression for QueueActivity going stale against SnapshotStore: the
++        // reader is on the last item of a 5-item queue, a smaller snapshot of
++        // 2 items arrives, and the very next navigation must land somewhere
++        // valid rather than relying on a size the caller forgot to refresh.
++        cursor.setSize(5);
++        cursor.next();
++        cursor.next();
++        cursor.next();
++        cursor.next();
++        assertEquals(4, cursor.index());
++
++        cursor.setSize(2);
++        cursor.previous();
++
++        int index = cursor.index();
++        assertTrue("index must stay within [0, 1] after the shrink, was " + index,
++                index >= 0 && index <= 1);
++    }
+ }
