@@ -52,6 +52,7 @@ public final class SnapshotStore {
 
     private volatile Snapshot current = EMPTY;
     private volatile long lastContactElapsedMs = NEVER;
+    private volatile boolean versionMismatch;
 
     /** Created with the first listener, so the store stays constructible off-device. */
     private Handler mainHandler; // guarded by this
@@ -122,6 +123,31 @@ public final class SnapshotStore {
         // Without this the queue screen shows the previous item until the next
         // swipe - and if the cursor is already at the end of the list, that
         // swipe does not move and never redraws either.
+        notifyChanged();
+    }
+
+    /**
+     * True when the phone last spoke a protocol version this build cannot read.
+     *
+     * Spec section 7.1 requires an explicit state, not a message: on a
+     * see-through prism the wearer is very likely looking away for the few
+     * seconds a Toast is up, and a mismatch that scrolls past unseen is
+     * indistinguishable from the app being broken. Loud failure beats
+     * mysterious silence, so this sticks until a good handshake clears it.
+     *
+     * In-memory rather than on disk deliberately: it describes the phone
+     * currently on the other end of the link, not anything about this device.
+     */
+    public boolean isVersionMismatch() {
+        return versionMismatch;
+    }
+
+    /** Set on a foreign protocol version; cleared by a successful handshake. */
+    public void setVersionMismatch(boolean mismatch) {
+        if (versionMismatch == mismatch) {
+            return;
+        }
+        versionMismatch = mismatch;
         notifyChanged();
     }
 

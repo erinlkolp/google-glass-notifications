@@ -162,6 +162,15 @@ public final class QueueActivity extends Activity implements SnapshotStore.Liste
         List<NotificationItem> items = store.items();
         cursor.setSize(items.size());
 
+        if (store.isVersionMismatch()) {
+            // Takes precedence over the queue: whatever is cached is from a
+            // phone this build cannot talk to, so showing it as current would
+            // be worse than showing nothing. Spec section 7.1.
+            container.addView(
+                    CardRenderer.messageCard(this, getString(R.string.version_mismatch)));
+            return;
+        }
+
         if (items.isEmpty()) {
             container.addView(CardRenderer.messageCard(this, getString(R.string.empty_queue)));
             return;

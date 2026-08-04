@@ -11,7 +11,6 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.util.Log;
-import android.widget.Toast;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -184,7 +183,11 @@ public final class LinkServerService extends Service {
                 if (frame.version != Protocol.VERSION) {
                     Log.w(TAG, "protocol version " + frame.version
                             + " from phone, expected " + Protocol.VERSION);
-                    showMessage(getString(R.string.version_mismatch));
+                    // A state, not a message. A ~3.5s Toast on a see-through
+                    // prism is one the wearer is very likely looking away
+                    // from, and a mismatch that goes unseen looks exactly like
+                    // the app being broken. Spec section 7.1.
+                    GlassNotify.store(this).setVersionMismatch(true);
                     return;
                 }
 
@@ -202,6 +205,10 @@ public final class LinkServerService extends Service {
             case MessageType.HELLO: {
                 Hello hello = HelloCodec.decode(frame.body);
                 Log.i(TAG, "hello from " + hello.deviceName + " " + hello.deviceAddress);
+                // A HELLO that got this far carried a version we understand,
+                // which is the successful handshake that clears a mismatch
+                // left over from a previous connection.
+                GlassNotify.store(this).setVersionMismatch(false);
                 GlassNotify.store(this).markContact();
                 break;
             }
@@ -233,15 +240,6 @@ public final class LinkServerService extends Service {
                 if (interrupt != null) {
                     overlay.show(interrupt);
                 }
-            }
-        });
-    }
-
-    private void showMessage(final String message) {
-        main.post(new Runnable() {
-            @Override
-            public void run() {
-                Toast.makeText(LinkServerService.this, message, Toast.LENGTH_LONG).show();
             }
         });
     }
