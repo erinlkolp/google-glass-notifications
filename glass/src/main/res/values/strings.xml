@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Notifications</string>
+    <string name="empty_queue">Nothing waiting</string>
+    <string name="stale_queue">Not connected</string>
+    <string name="version_mismatch">Phone app out of date</string>
+</resources>
