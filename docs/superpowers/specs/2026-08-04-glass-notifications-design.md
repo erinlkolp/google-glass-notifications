@@ -386,7 +386,7 @@ lever alongside phone-side filtering.
 
 | Situation | Behaviour |
 |---|---|
-| Bluetooth off, either side | Watch `ACTION_STATE_CHANGED` and idle; do not spin a retry loop |
+| Bluetooth off, either side | Poll on a slow interval and idle between checks; do not spin a retry loop (see §11.2) |
 | Devices not bonded | Phone shows a setup screen. Programmatic pairing is never attempted |
 | Corrupt frame / bad length | Close the socket and reconnect. Never attempt mid-stream resync |
 | Protocol version mismatch | Glass displays "phone app out of date" |
@@ -405,6 +405,22 @@ mismatch. This prevents a stranger in range pushing arbitrary text into the wear
 wipe, and a replacement phone would present a different MAC as well. Without a way to clear the pin,
 either event permanently breaks the pairing. `adb shell pm clear <package>` is sufficient and needs no
 UI, but it must be documented rather than left as folklore.
+
+### 11.2 Bluetooth-off handling: polling, not a broadcast receiver
+
+Amended 2026-08-04 after the whole-branch review, which correctly observed that
+neither side registers for `ACTION_STATE_CHANGED`. Both poll instead — Glass every
+5s in its accept loop, the phone every 10s in its connect loop — and idle in a real
+sleep between checks, so both devices still suspend normally.
+
+The original text called for a broadcast receiver on each side. That was decided by
+omission rather than deliberately: no task owned it, and every task-scoped review
+saw only its own slice. Presented with the choice, the trade was judged not worth
+making — two more components with their own registration lifecycles, on a link that
+already has a heartbeat, to save a wake every 5–10 seconds that the device sleeps
+through anyway.
+
+**The spec now describes what shipped.** Polling is the specified behaviour.
 
 ---
 
