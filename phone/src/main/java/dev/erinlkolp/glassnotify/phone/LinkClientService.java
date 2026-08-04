@@ -13,7 +13,6 @@ import android.os.IBinder;
 import android.util.Log;
 
 import java.io.IOException;
-import java.io.OutputStream;
 import java.util.Set;
 
 import dev.erinlkolp.glassnotify.wire.FrameCodec;
@@ -43,6 +42,8 @@ public final class LinkClientService extends Service implements SnapshotBus.List
 
     private final Backoff backoff = new Backoff();
     private final Object socketLock = new Object();
+    /** All frame writes funnel through here; concurrent writes would splice frames. */
+    private final Object writeLock = new Object();
 
     private volatile boolean running;
     private Thread worker;
@@ -50,6 +51,7 @@ public final class LinkClientService extends Service implements SnapshotBus.List
 
     /** Set when something wants an immediate retry, e.g. ACL_CONNECTED. */
     private final Object wakeLock = new Object();
+    private boolean wakeRequested; // guarded by wakeLock
 
     public static void start(Context context) {
         context.startService(new Intent(context, LinkClientService.class));
@@ -75,6 +77,7 @@ public final class LinkClientService extends Service implements SnapshotBus.List
         if (intent != null && intent.getBooleanExtra("wake", false)) {
             backoff.reset();
             synchronized (wakeLock) {
+                wakeRequested = true;
                 wakeLock.notifyAll();
             }
         }
@@ -124,11 +127,23 @@ public final class LinkClientService extends Service implements SnapshotBus.List
                 attempt = glass.createRfcommSocketToServiceRecord(Protocol.SERVICE_UUID);
                 // Discovery is expensive and interferes with connecting.
                 BluetoothAdapter.getDefaultAdapter().cancelDiscovery();
-                attempt.connect();
 
+                // Published before connect() so a concurrent onDestroy() can
+                // close this socket while it is still blocked inside
+                // connect() - closing it there makes connect() throw instead
+                // of leaving the worker unkillable until Glass answers.
                 synchronized (socketLock) {
                     socket = attempt;
                 }
+                attempt.connect();
+
+                if (!running) {
+                    // onDestroy() ran while connect() was blocking. Don't
+                    // send Glass a live handshake and snapshot from a
+                    // service that's going away.
+                    return;
+                }
+
                 backoff.reset();
                 status(R.string.status_connected);
                 pump(attempt);
@@ -150,10 +165,8 @@ public final class LinkClientService extends Service implements SnapshotBus.List
 
     /** Sends the handshake, an immediate snapshot, then heartbeats until the link dies. */
     private void pump(BluetoothSocket connected) throws IOException {
-        OutputStream out = connected.getOutputStream();
-
         BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
-        FrameCodec.write(out, MessageType.HELLO,
+        writeFrame(connected, MessageType.HELLO,
                 HelloCodec.encode(new Hello(
                         adapter.getName() == null ? "phone" : adapter.getName(),
                         adapter.getAddress() == null ? "" : adapter.getAddress())));
@@ -168,7 +181,7 @@ public final class LinkClientService extends Service implements SnapshotBus.List
             }
             // A write failure is how a half-dead socket is discovered - there
             // is no read side to notice EOF on. Throws out to the retry loop.
-            FrameCodec.write(out, MessageType.PING, new byte[0]);
+            writeFrame(connected, MessageType.PING, new byte[0]);
         }
     }
 
@@ -186,11 +199,23 @@ public final class LinkClientService extends Service implements SnapshotBus.List
             return; // Not connected. The next connection sends the latest anyway.
         }
         try {
-            FrameCodec.write(current.getOutputStream(), MessageType.SNAPSHOT,
-                    SnapshotCodec.encode(snapshot));
+            writeFrame(current, MessageType.SNAPSHOT, SnapshotCodec.encode(snapshot));
         } catch (IOException e) {
             Log.i(TAG, "send failed, dropping link: " + e.getMessage());
             closeSocket(); // Unblocks the worker so it can back off and retry.
+        }
+    }
+
+    /**
+     * All frame writes funnel through here. The worker thread writes HELLO
+     * and PING; the SnapshotBus callback thread writes SNAPSHOT. Without a
+     * single choke point around the actual write, the two could interleave
+     * bytes on the same stream and splice a frame - undetectable on this end
+     * since there is no read side to notice the desync.
+     */
+    private void writeFrame(BluetoothSocket target, int type, byte[] body) throws IOException {
+        synchronized (writeLock) {
+            FrameCodec.write(target.getOutputStream(), type, body);
         }
     }
 
@@ -212,14 +237,25 @@ public final class LinkClientService extends Service implements SnapshotBus.List
         return null;
     }
 
-    /** Sleeps, but returns early if wake() is called. */
+    /**
+     * Sleeps, but returns early if wake() is called - including a wake()
+     * that arrived just before this method was entered, e.g. while status()
+     * was busy on a Binder call to NotificationManager. Without the flag,
+     * that notifyAll() would land with nobody waiting and be lost, forcing
+     * the full stale backoff to run out regardless.
+     */
     private void waitFor(long ms) {
         synchronized (wakeLock) {
+            if (wakeRequested) {
+                wakeRequested = false;
+                return;
+            }
             try {
                 wakeLock.wait(ms);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+            wakeRequested = false;
         }
     }
 
