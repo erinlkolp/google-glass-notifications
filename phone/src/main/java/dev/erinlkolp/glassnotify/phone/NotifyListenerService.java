@@ -31,8 +31,7 @@ public final class NotifyListenerService extends NotificationListenerService {
         // getActiveNotifications is only valid once connected, so this is the
         // first point at which a complete snapshot can be built.
         republish();
-        // Task 11 adds the LinkClientService.start(this) call here, once that
-        // class exists. Publishing to the bus is useful on its own until then.
+        LinkClientService.start(this);
     }
 
     @Override
