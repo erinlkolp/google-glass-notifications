@@ -1435,6 +1435,13 @@ android {
         targetCompatibility = JavaVersion.VERSION_1_8
     }
 
+    // AGP 8.x stopped generating BuildConfig by default. Task 8's
+    // DebugInjectReceiver gates on BuildConfig.DEBUG and will not compile
+    // without this opt-in.
+    buildFeatures {
+        buildConfig = true
+    }
+
     buildTypes {
         release { isMinifyEnabled = false }
     }
