@@ -37,15 +37,17 @@ ROM available for the device.
 | Display | 640×360 physical at density 240 → **320×180 dp** |
 | Optics | See-through prism. Pure black / pure white only; mid-tones and gradients wash out |
 | Bluetooth | BCM4330. Classic BT healthy (HFP, A2DP, AVRCP). BLE **central only** |
+| BT address | `22:22:41:C5:E5:67`, name "Glass 1" — see §5.1, this is *not* the factory address |
 | Status bar | Claims `touchableRegion [0,0][640,38]` — steals downward swipes near the top of the pad |
 
 ### 2.2 LG V30 / VS996 (the source)
 
 | Property | Value |
 |---|---|
-| Android | 9 (Pie), build `PKQ1.190414.001` |
+| Android | 9 (Pie), API 28, build `PKQ1.190414.001`, device `joan` |
+| adb serial | `VS9967edd915b` |
 | Role | Carried relay — rides in a bag or pocket, signed into key accounts, no SIM |
-| Bluetooth | 5.0, classic RFCOMM |
+| Bluetooth | 5.0, classic RFCOMM. Address `10:F1:F2:EE:90:8F`, name "V30" |
 
 The V30 is a *second* phone. Erin's primary device is an iPhone. This design therefore surfaces
 notifications for accounts signed in on the V30 (Signal, Discord, Slack, Gmail, and similar
@@ -158,6 +160,23 @@ may initiate, and reconnection is symmetric.
 **Glass is the server; the phone is the client and owns retry.** Reconnection means a backoff loop
 running indefinitely, which belongs on the device with the larger battery and a foreground service
 already required. Glass simply blocks in `accept()`, which costs nothing.
+
+### 5.1 Glass's Bluetooth address is generated, not factory
+
+Verified 2026-08-04. `ro.bt.bdaddr_path` points at `/data/misc/bluedroid/bdaddr`, **which does not
+exist**. Bluedroid therefore generated a random locally-administered address (`0x22` first octet has
+the locally-administered bit set) and persisted it:
+
+```
+persist.service.bdroid.bdaddr = 22:22:41:c5:e5:67   <- in use
+ro.boot.bdaddr                = f8:8f:ca:12:ff:c9   <- factory, unused
+```
+
+Because `persist.*` properties are written to `/data/property/`, the address is stable across
+reboots, so MAC pinning (§11.1) and the phone's `ACTION_ACL_CONNECTED` filter (§10.2) are both sound.
+
+**But a `/data` wipe or ROM reflash will produce a new random address.** The pinning in §11.1 must
+therefore have a reset path, or a reflash locks the wearer out of their own device.
 
 ---
 
@@ -382,6 +401,11 @@ Since Glass has no configuration UI, connections are pinned **trust-on-first-use
 to connect has its MAC persisted, and every later connection is checked against it and rejected on
 mismatch. This prevents a stranger in range pushing arbitrary text into the wearer's field of view.
 
+**A reset path is mandatory, not optional.** Per §5.1, Glass's own address is regenerated on a `/data`
+wipe, and a replacement phone would present a different MAC as well. Without a way to clear the pin,
+either event permanently breaks the pairing. `adb shell pm clear <package>` is sufficient and needs no
+UI, but it must be documented rather than left as folklore.
+
 ---
 
 ## 12. Testing
@@ -460,12 +484,25 @@ Explicitly deferred, and not to be added without a further design pass:
 
 None blocking. To confirm during implementation:
 
-1. **The V30 is not yet visible to `adb`** — USB debugging was being enabled as this design was
-   written. Its Bluetooth MAC and a confirmed API level are needed before the phone module is wired
-   up, but nothing structural depends on them. Note that `/etc/udev/rules.d/51-android.rules`
-   currently matches only Google's vendor ID `18d1`; LG is `1004`, and the phone re-enumerates with a
-   new product ID when the ADB interface appears, so the rule may need widening.
-2. **Interrupt display duration** (~5s) and **`PING` staleness threshold** are starting values to be
-   tuned on hardware.
+1. **The two devices are not yet bonded.** `dumpsys bluetooth_manager` on the V30 shows an empty
+   bonded-devices list. Pairing is a manual, one-time setup step — §11 states the apps never attempt
+   programmatic pairing — and must happen before any end-to-end test.
+2. **Interrupt display duration** (~5s), **`PING` interval** (10s) and **staleness threshold** (~30s)
+   are starting values to be tuned on hardware.
 3. **Allowlist configuration UI** — the interaction detail is left to the implementation plan. The
-   data model (per-app, with tier) is fixed by §7.3 and §8.
+   data model (per-app, with tier) is fixed by §7.3 and §8. Note the phone's setup screen can detect
+   whether access has been granted by reading `settings get secure enabled_notification_listeners`,
+   a colon-separated list of `package/class` entries.
+4. **The `tier` enum will trigger the d8 NPE** described in §12.6, since `wire` is dexed into both
+   apps. Decide during planning between the `MethodParameters`-stripping workaround and representing
+   `tier` as an int constant.
+
+### 14.1 Resolved during design
+
+- **V30 adb access.** Now working: serial `VS9967edd915b`, API 28 confirmed. The obstacle was the USB
+  debugging toggle, not USB mode — cycling Charging/MTP/PTP changes the product ID (`62ce`, `62c1`,
+  `62c9`) without ever publishing the ADB interface. Watch for interface class 255 / subclass 66 /
+  protocol 1, not for a PID change. The final `unauthorized` state cleared after `adb kill-server &&
+  adb start-server` with the phone unlocked; the RSA prompt is suppressed on the lock screen.
+- **udev.** Not needed. `/etc/udev/rules.d/51-android.rules` matches only Google's `18d1`, but the LG
+  node came up `root plugdev` with a `uaccess` ACL from a systemd default, and adb connected fine.
