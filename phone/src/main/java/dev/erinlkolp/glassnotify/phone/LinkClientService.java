@@ -364,23 +364,39 @@ public final class LinkClientService extends Service implements SnapshotBus.List
      * nobody waiting and be lost, forcing the full stale backoff to run out
      * regardless.
      *
-     * Deliberately not woken by a pending snapshot. A chatty notification
-     * stream must not be able to shorten the reconnect backoff, or the retry
-     * cadence would be set by how much mail arrives.
+     * Deliberately not shortened by a pending snapshot - and that takes a
+     * condition loop, not just the absence of a snapshotPending check.
+     * {@link #onSnapshot} signals this same monitor, and {@code
+     * Object.wait(long)} returns identically on a timeout and on a notify, so a
+     * bare {@code wait(ms)} cannot tell the two apart: it falls through on the
+     * first notification to arrive. That hands the reconnect cadence to the
+     * notification stream - every post or removal becomes an RFCOMM connect
+     * attempt - and the exponential backoff never engages at all.
+     *
+     * So the loop below re-checks a condition rather than trusting the return.
+     * Only {@link #wakeRequested} (a real {@code wake()}) or {@code !running}
+     * (teardown) ends the wait early, and both are latched flags, so neither can
+     * be missed by arriving a moment before the wait is entered. Every other
+     * wakeup recomputes the time still owed and parks again.
+     *
+     * The deadline is on {@link SystemClock#elapsedRealtime}, not
+     * {@code System.currentTimeMillis()}, so a clock adjustment mid-wait can
+     * neither stretch the remaining time nor collapse it to zero.
      */
     private void waitForWake(long ms) {
+        long deadline = SystemClock.elapsedRealtime() + ms;
         synchronized (wakeLock) {
-            if (wakeRequested) {
-                wakeRequested = false;
-                return;
-            }
-            if (running && ms > 0) {
-                // wait(0) waits forever; ms is always positive here, but the
-                // guard keeps that from becoming a hang if it ever is not.
+            while (running && !wakeRequested) {
+                long remaining = deadline - SystemClock.elapsedRealtime();
+                if (remaining <= 0) {
+                    break;
+                }
+                // wait(0) waits forever; the check above is what rules it out.
                 try {
-                    wakeLock.wait(ms);
+                    wakeLock.wait(remaining);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    break;
                 }
             }
             wakeRequested = false;
@@ -391,6 +407,19 @@ public final class LinkClientService extends Service implements SnapshotBus.List
      * Parks the worker until the next PING is due, a snapshot needs sending,
      * or the service is going away. Returns true if a snapshot is waiting,
      * consuming the flag.
+     *
+     * No deadline loop here, unlike {@link #waitForWake}. {@link #pump} tracks
+     * an absolute {@code nextPingAt} and re-enters this method with whatever
+     * time is left, so an early return costs one extra pass round a loop that
+     * then finds nothing to do - it cannot shorten the heartbeat interval.
+     *
+     * Both flags are consumed on the way out. {@code wakeRequested} means "cut
+     * the connect backoff short", and inside a live session there is no backoff
+     * to cut; leaving it set would carry it past the end of this session into
+     * the first {@link #waitForWake} after the link drops, which would then
+     * return instantly and skip a whole backoff interval. Consuming it here is
+     * what the pre-single-writer wait did, and it keeps the flag meaning one
+     * thing: nobody has acted on the wake yet.
      */
     private boolean awaitWork(long ms) {
         synchronized (wakeLock) {
@@ -401,6 +430,7 @@ public final class LinkClientService extends Service implements SnapshotBus.List
                     Thread.currentThread().interrupt();
                 }
             }
+            wakeRequested = false;
             boolean pending = snapshotPending;
             snapshotPending = false;
             return pending;
