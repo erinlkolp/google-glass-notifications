@@ -82,7 +82,7 @@ public final class DebugInjectReceiver extends BroadcastReceiver {
 
     /** Runs the same interrupt path the real link service uses. */
     private void notifyUi(final Context context, final Snapshot previous, final Snapshot next) {
-        final InterruptOverlay overlay = new InterruptOverlay(context);
+        final InterruptOverlay overlay = GlassNotify.overlay(context);
         new Handler(Looper.getMainLooper()).post(new Runnable() {
             @Override
             public void run() {

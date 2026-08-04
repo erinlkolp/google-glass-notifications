@@ -17,6 +17,7 @@ public final class GlassNotify {
 
     private static SnapshotStore store;
     private static PeerPin peerPin;
+    private static InterruptOverlay overlay;
 
     private GlassNotify() {
     }
@@ -37,5 +38,18 @@ public final class GlassNotify {
             peerPin = new PeerPin(prefs);
         }
         return peerPin;
+    }
+
+    /**
+     * One overlay for the whole process, so a second interrupt arriving while
+     * the first is still showing replaces it and restarts the timer instead of
+     * stacking a second window. Shared by the link service and the debug
+     * receiver alike.
+     */
+    public static synchronized InterruptOverlay overlay(Context context) {
+        if (overlay == null) {
+            overlay = new InterruptOverlay(context.getApplicationContext());
+        }
+        return overlay;
     }
 }

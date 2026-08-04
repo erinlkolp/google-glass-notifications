@@ -38,7 +38,18 @@ public final class LinkServerService extends Service {
 
     private volatile boolean running;
     private Thread acceptThread;
-    private BluetoothServerSocket serverSocket;
+    private volatile BluetoothServerSocket serverSocket;
+
+    /**
+     * The socket of the connection currently being served, for the whole time
+     * serve() is running; null otherwise. Closing it from onDestroy() is what
+     * unblocks a FrameCodec.read() the accept thread is blocked in - the
+     * listening serverSocket is already closed and gone by the time a
+     * connection is being served, so it cannot do that job. Volatile because
+     * it is written on the accept thread and read from the main thread with
+     * no other happens-before edge between them.
+     */
+    private volatile BluetoothSocket connectedSocket;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private InterruptOverlay overlay;
@@ -53,7 +64,7 @@ public final class LinkServerService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        overlay = new InterruptOverlay(this);
+        overlay = GlassNotify.overlay(this);
         GlassNotify.store(this);
     }
 
@@ -77,6 +88,7 @@ public final class LinkServerService extends Service {
     public void onDestroy() {
         running = false;
         closeServerSocket();
+        closeConnectedSocket();
         super.onDestroy();
         main.post(new Runnable() {
             @Override
@@ -113,13 +125,14 @@ public final class LinkServerService extends Service {
             try {
                 socket = serverSocket.accept();
                 closeServerSocket();
+                connectedSocket = socket;
                 serve(socket);
             } catch (IOException e) {
                 if (running) {
                     Log.w(TAG, "accept failed", e);
                 }
             } finally {
-                closeQuietly(socket);
+                closeConnectedSocket();
                 closeServerSocket();
             }
         }
@@ -220,7 +233,9 @@ public final class LinkServerService extends Service {
         }
     }
 
-    private static void closeQuietly(BluetoothSocket socket) {
+    private void closeConnectedSocket() {
+        BluetoothSocket socket = connectedSocket;
+        connectedSocket = null;
         if (socket != null) {
             try {
                 socket.close();
