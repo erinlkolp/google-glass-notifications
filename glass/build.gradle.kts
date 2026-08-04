@@ -30,3 +30,9 @@ dependencies {
     implementation(project(":wire"))
     testImplementation("junit:junit:4.13.2")
 }
+
+// Source/target 8 is pinned for the life of the project - the Glass device is
+// API 22 - so javac's "obsolete" advice to move off it is not actionable.
+tasks.withType<JavaCompile>().configureEach {
+    options.compilerArgs.add("-Xlint:-options")
+}
