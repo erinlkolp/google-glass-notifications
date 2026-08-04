@@ -108,6 +108,61 @@ public class SnapshotBuilderTest {
     }
 
     @Test
+    public void truncatesTheKey() {
+        // getKey() is "userId|package|id|tag|uid" and the tag is whatever the
+        // posting app put there. Twenty of these at multi-KB apiece would take
+        // the snapshot past MAX_FRAME_BYTES, which the link cannot recover from.
+        StringBuilder long_ = new StringBuilder();
+        for (int i = 0; i < Protocol.MAX_KEY_CHARS * 2; i++) {
+            long_.append('k');
+        }
+        SourceNotification s = new SourceNotification(long_.toString(), "pkg", "Signal",
+                "title", "body", 100L, false);
+
+        Snapshot snapshot = SnapshotBuilder.build(1L, Arrays.asList(s), allow("pkg", Tier.QUEUE));
+
+        assertEquals(Protocol.MAX_KEY_CHARS, snapshot.items.get(0).key.length());
+    }
+
+    @Test
+    public void truncatesTheAppLabel() {
+        StringBuilder long_ = new StringBuilder();
+        for (int i = 0; i < Protocol.MAX_APP_LABEL_CHARS * 2; i++) {
+            long_.append('a');
+        }
+        SourceNotification s = new SourceNotification("a", "pkg", long_.toString(),
+                "title", "body", 100L, false);
+
+        Snapshot snapshot = SnapshotBuilder.build(1L, Arrays.asList(s), allow("pkg", Tier.QUEUE));
+
+        assertEquals(Protocol.MAX_APP_LABEL_CHARS, snapshot.items.get(0).appLabel.length());
+    }
+
+    @Test
+    public void aWorstCaseSnapshotStillEncodesIntoOneFrame() {
+        // The end-to-end statement of the cap: MAX_ITEMS notifications whose
+        // every field is oversized must still produce a sendable frame.
+        StringBuilder long_ = new StringBuilder();
+        for (int i = 0; i < 4_000; i++) {
+            long_.append('z');
+        }
+        String huge = long_.toString();
+        List<SourceNotification> sources = new ArrayList<SourceNotification>();
+        for (int i = 0; i < Protocol.MAX_ITEMS; i++) {
+            sources.add(new SourceNotification(huge + i, "pkg", huge, huge, huge, 100L + i, false));
+        }
+
+        Snapshot snapshot = SnapshotBuilder.build(1L, sources, allow("pkg", Tier.QUEUE));
+
+        try {
+            assertTrue(dev.erinlkolp.glassnotify.wire.SnapshotCodec.encode(snapshot).length
+                    <= dev.erinlkolp.glassnotify.wire.FrameCodec.MAX_BODY_BYTES);
+        } catch (java.io.IOException e) {
+            throw new AssertionError("worst-case snapshot did not encode", e);
+        }
+    }
+
+    @Test
     public void leavesShortTextAlone() {
         Snapshot snapshot = SnapshotBuilder.build(1L,
                 Arrays.asList(source("a", "pkg", 100L)), allow("pkg", Tier.QUEUE));

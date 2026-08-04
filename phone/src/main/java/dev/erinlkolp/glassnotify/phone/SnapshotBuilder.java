@@ -59,8 +59,13 @@ public final class SnapshotBuilder {
                 break;
             }
             items.add(new NotificationItem(
-                    source.key,
-                    source.appLabel,
+                    // key and appLabel are as app-controlled as the body text
+                    // is: getKey()'s tag component and the label from the app's
+                    // manifest are both unbounded. Untruncated, twenty items
+                    // can push the snapshot past MAX_FRAME_BYTES, which the
+                    // link cannot recover from on its own.
+                    truncate(source.key, Protocol.MAX_KEY_CHARS),
+                    truncate(source.appLabel, Protocol.MAX_APP_LABEL_CHARS),
                     truncate(source.title, Protocol.MAX_TITLE_CHARS),
                     truncate(source.text, Protocol.MAX_TEXT_CHARS),
                     source.postedAt,
