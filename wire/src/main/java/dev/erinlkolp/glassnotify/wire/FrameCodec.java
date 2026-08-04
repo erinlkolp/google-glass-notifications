@@ -24,6 +24,13 @@ public final class FrameCodec {
     /** version + type. */
     private static final int HEADER_AFTER_LENGTH = 2;
 
+    /**
+     * Largest body that still fits inside MAX_FRAME_BYTES once framed.
+     * Exposed so senders can shrink a message rather than discover at write
+     * time that it cannot be sent at all.
+     */
+    public static final int MAX_BODY_BYTES = Protocol.MAX_FRAME_BYTES - HEADER_AFTER_LENGTH;
+
     private FrameCodec() {
     }
 

@@ -23,6 +23,28 @@ public final class Protocol {
     /** Titles are truncated to this many characters by the phone, before sending. */
     public static final int MAX_TITLE_CHARS = 80;
 
+    /**
+     * Keys are truncated to this many characters by the phone, before sending.
+     *
+     * StatusBarNotification.getKey() is "userId|package|id|tag|uid" and the tag
+     * component is app-controlled and unbounded, so without a cap a single
+     * misbehaving app can push a snapshot past MAX_FRAME_BYTES. 96 characters
+     * comfortably covers a real package name plus a sane tag, which is all the
+     * uniqueness the queue needs - the key is only ever compared for equality
+     * between consecutive snapshots, never interpreted.
+     */
+    public static final int MAX_KEY_CHARS = 96;
+
+    /**
+     * App labels are truncated to this many characters by the phone.
+     *
+     * Rendered uppercase at 12dp with letter spacing on a 320x180dp prism, so
+     * anything past roughly two dozen characters is ellipsised on screen
+     * regardless. Same unbounded-input concern as MAX_KEY_CHARS: the label
+     * comes from the app's own manifest.
+     */
+    public static final int MAX_APP_LABEL_CHARS = 24;
+
     /** SDP service record name advertised by the Glass server socket. */
     public static final String SERVICE_NAME = "GlassNotify";
 

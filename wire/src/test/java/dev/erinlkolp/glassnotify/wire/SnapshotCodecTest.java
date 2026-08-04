@@ -55,24 +55,98 @@ public class SnapshotCodecTest {
         }
     }
 
+    /** A string of exactly {@code length} copies of {@code c}. */
+    private static String repeat(char c, int length) {
+        StringBuilder builder = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            builder.append(c);
+        }
+        return builder.toString();
+    }
+
+    /** MAX_ITEMS items with every single field at its cap. */
+    private static Snapshot worstCase(char fill) {
+        List<NotificationItem> items = new ArrayList<NotificationItem>();
+        for (int i = 0; i < Protocol.MAX_ITEMS; i++) {
+            items.add(new NotificationItem(
+                    repeat(fill, Protocol.MAX_KEY_CHARS),
+                    repeat(fill, Protocol.MAX_APP_LABEL_CHARS),
+                    repeat(fill, Protocol.MAX_TITLE_CHARS),
+                    repeat(fill, Protocol.MAX_TEXT_CHARS),
+                    1785870000000L, Tier.QUEUE));
+        }
+        return new Snapshot(1L, items);
+    }
+
     @Test
     public void aFullSnapshotFitsComfortablyInOneFrame() throws IOException {
-        // Spec section 6 claims roughly 3KB. If that assumption ever breaks,
-        // the snapshot-per-change design needs revisiting, so assert it.
+        // Every field at its cap, not just the body: key and appLabel come
+        // from app-controlled strings, so a test that pins them at "key-3" and
+        // "Signal" proves nothing about the real ceiling. If this assumption
+        // ever breaks, the snapshot-per-change design needs revisiting.
+        int size = SnapshotCodec.encode(worstCase('x')).length;
+
+        assertTrue("worst-case snapshot was " + size + " bytes", size < 16 * 1024);
+        assertTrue(size <= FrameCodec.MAX_BODY_BYTES);
+    }
+
+    @Test
+    public void aFullSnapshotOfMultiByteTextStillFitsInOneFrame() throws IOException {
+        // writeUTF spends three bytes on a BMP character outside Latin-1, so
+        // the caps are measured in chars but the frame limit is in bytes. A
+        // queue full of CJK is the genuine worst case.
+        // Escaped rather than literal so the test does not depend on the
+        // compiler's source encoding.
+        int size = SnapshotCodec.encode(worstCase('\u4e2d')).length;
+
+        assertTrue("multi-byte worst case was " + size + " bytes",
+                size <= FrameCodec.MAX_BODY_BYTES);
+    }
+
+    @Test
+    public void encodeWithinFrameLeavesAFittingSnapshotAlone() throws IOException {
+        Snapshot original = worstCase('x');
+
+        Snapshot decoded = SnapshotCodec.decode(SnapshotCodec.encodeWithinFrame(original));
+
+        assertEquals(Protocol.MAX_ITEMS, decoded.items.size());
+    }
+
+    @Test
+    public void encodeWithinFrameDropsTheOldestItemsUntilItFits() throws IOException {
+        // Bypasses the phone's per-field caps deliberately: this is the guard
+        // that stops an oversized snapshot becoming a permanent reconnect loop.
+        String huge = repeat('x', 40_000);
         List<NotificationItem> items = new ArrayList<NotificationItem>();
-        StringBuilder text = new StringBuilder();
-        for (int i = 0; i < Protocol.MAX_TEXT_CHARS; i++) {
-            text.append('x');
-        }
-        for (int i = 0; i < Protocol.MAX_ITEMS; i++) {
+        for (int i = 0; i < 4; i++) {
             items.add(new NotificationItem("key-" + i, "Signal", "Jordan Reyes",
-                    text.toString(), 1785870000000L, Tier.QUEUE));
+                    huge, 1785870000000L, Tier.QUEUE));
         }
 
-        int size = SnapshotCodec.encode(new Snapshot(1L, items)).length;
+        byte[] encoded = SnapshotCodec.encodeWithinFrame(new Snapshot(7L, items));
 
-        assertTrue("worst-case snapshot was " + size + " bytes", size < 8 * 1024);
-        assertTrue(size < Protocol.MAX_FRAME_BYTES);
+        assertTrue(encoded.length <= FrameCodec.MAX_BODY_BYTES);
+        Snapshot decoded = SnapshotCodec.decode(encoded);
+        assertEquals(7L, decoded.snapshotId);
+        // Newest survive, oldest go: only "key-0" fits at 40KB apiece.
+        assertEquals(1, decoded.items.size());
+        assertEquals("key-0", decoded.items.get(0).key);
+    }
+
+    @Test
+    public void encodeWithinFrameSurvivesASingleUnsendableItem() throws IOException {
+        // Even one item can be too big. Dropping to empty beats throwing:
+        // Glass showing "Nothing waiting" is recoverable, a wedged link is not.
+        List<NotificationItem> items = new ArrayList<NotificationItem>();
+        // writeUTF itself caps a single string at 65535 bytes, so it takes two
+        // large fields to push one item past the frame limit on its own.
+        items.add(new NotificationItem("k", "Signal", repeat('x', 1_000),
+                repeat('x', 65_000), 1785870000000L, Tier.QUEUE));
+
+        byte[] encoded = SnapshotCodec.encodeWithinFrame(new Snapshot(1L, items));
+
+        assertTrue(encoded.length <= FrameCodec.MAX_BODY_BYTES);
+        assertEquals(0, SnapshotCodec.decode(encoded).items.size());
     }
 
     @Test

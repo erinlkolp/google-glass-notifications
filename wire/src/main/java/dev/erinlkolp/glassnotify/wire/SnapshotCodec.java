@@ -52,6 +52,41 @@ public final class SnapshotCodec {
         return bytes.toByteArray();
     }
 
+    /**
+     * Encodes, dropping the oldest items until the result fits in one frame.
+     *
+     * The per-field caps in {@link Protocol} should already make this
+     * impossible, but "should" is not a guarantee against input the phone does
+     * not control. If an oversized snapshot ever did reach the writer, the
+     * failure mode without this is unrecoverable rather than merely lossy:
+     * FrameCodec.write throws, the sender drops the link, reconnects, and the
+     * handshake re-sends the identical snapshot - a reconnect loop that never
+     * self-heals and presents as "phone connected, Glass blank". Losing the
+     * tail of the queue is strictly better than that.
+     *
+     * Items are newest-first, so the oldest is the last one - which is also
+     * the one the wearer is least likely to be looking for.
+     */
+    public static byte[] encodeWithinFrame(Snapshot snapshot) throws IOException {
+        byte[] encoded = encode(snapshot);
+        if (encoded.length <= FrameCodec.MAX_BODY_BYTES) {
+            return encoded;
+        }
+
+        List<NotificationItem> items =
+                new ArrayList<NotificationItem>(snapshot.items);
+        while (!items.isEmpty()) {
+            items.remove(items.size() - 1);
+            encoded = encode(new Snapshot(snapshot.snapshotId, items));
+            if (encoded.length <= FrameCodec.MAX_BODY_BYTES) {
+                return encoded;
+            }
+        }
+        // An empty snapshot is a fixed ten bytes, so the loop above always
+        // returns before falling through. Kept so the compiler agrees.
+        return encoded;
+    }
+
     public static Snapshot decode(byte[] body) throws IOException {
         DataInputStream in = new DataInputStream(new ByteArrayInputStream(body));
 

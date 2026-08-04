@@ -158,6 +158,30 @@ public class FrameCodecTest {
     }
 
     @Test
+    public void acceptsAFrameOfExactlyTheMaximumLength() throws IOException {
+        // The positive side of the size check. An off-by-one here would be
+        // invisible in normal traffic and would only bite on the one frame
+        // that is exactly at the limit - which is precisely the frame
+        // SnapshotCodec.encodeWithinFrame aims to produce when it shrinks.
+        byte[] body = new byte[FrameCodec.MAX_BODY_BYTES];
+        byte[] encoded = framed(MessageType.SNAPSHOT, body);
+
+        // 4 length bytes plus the frame itself, which is MAX_FRAME_BYTES.
+        assertEquals(4 + Protocol.MAX_FRAME_BYTES, encoded.length);
+        assertArrayEquals(body, FrameCodec.read(new ByteArrayInputStream(encoded)).body);
+    }
+
+    @Test
+    public void refusesToWriteABodyOneByteOverTheLimit() {
+        try {
+            FrameCodec.write(new ByteArrayOutputStream(), MessageType.SNAPSHOT,
+                    new byte[FrameCodec.MAX_BODY_BYTES + 1]);
+            fail("expected ProtocolException");
+        } catch (IOException expected) {
+        }
+    }
+
+    @Test
     public void refusesToWriteAnOversizedBody() {
         try {
             FrameCodec.write(new ByteArrayOutputStream(), MessageType.SNAPSHOT,
