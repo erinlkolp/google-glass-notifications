@@ -37,7 +37,9 @@ public final class SnapshotBus {
     private final Runnable deliver = new Runnable() {
         @Override
         public void run() {
-            pending = false;
+            synchronized (SnapshotBus.this) {
+                pending = false;
+            }
             Listener target = listener;
             if (target != null) {
                 target.onSnapshot(latest);
@@ -61,12 +63,19 @@ public final class SnapshotBus {
         this.listener = listener;
     }
 
-    /** Replaces the current snapshot and schedules a debounced delivery. */
+    /**
+     * Replaces the current snapshot and schedules a debounced delivery.
+     *
+     * Safe to call from any thread.
+     */
     public void publish(Snapshot snapshot) {
         latest = snapshot;
-        if (!pending) {
+        synchronized (this) {
+            if (pending) {
+                return;
+            }
             pending = true;
-            handler.postDelayed(deliver, DEBOUNCE_MS);
         }
+        handler.postDelayed(deliver, DEBOUNCE_MS);
     }
 }
