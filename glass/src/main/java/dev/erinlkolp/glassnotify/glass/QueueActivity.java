@@ -2,6 +2,8 @@ package dev.erinlkolp.glassnotify.glass;
 
 import android.app.Activity;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
@@ -17,11 +19,35 @@ import dev.erinlkolp.glassnotify.wire.NotificationItem;
  * Swipe forward/back pages, matching the gesture launcher's next/previous-app
  * idiom so there is no new muscle memory to build. Read-only by design: there
  * is no dismiss, and no action can be fired from here.
+ *
+ * Redraws come from two places while this is foregrounded. The store's
+ * listener covers arriving snapshots and version-mismatch changes, which are
+ * events. Staleness is not an event - nothing happens when the phone goes
+ * quiet - so it also polls, which is the only way the "Not connected" marker
+ * can ever appear on a screen the wearer is already looking at.
  */
-public final class QueueActivity extends Activity {
+public final class QueueActivity extends Activity implements SnapshotStore.Listener {
+
+    /**
+     * How often to redraw while foregrounded, purely so staleness surfaces.
+     *
+     * Well under SnapshotStore.STALE_AFTER_MS: presenting an hours-old
+     * notification as current is the failure this guards against (spec
+     * sections 7.3 and 11), so the marker must not lag the threshold by much.
+     */
+    private static final long REFRESH_INTERVAL_MS = 5_000L;
 
     private final QueueCursor cursor = new QueueCursor();
     private final SwipeDetector detector = new SwipeDetector();
+
+    private final Handler refreshHandler = new Handler(Looper.getMainLooper());
+    private final Runnable refreshTick = new Runnable() {
+        @Override
+        public void run() {
+            render();
+            refreshHandler.postDelayed(this, REFRESH_INTERVAL_MS);
+        }
+    };
 
     private SnapshotStore store;
     private FrameLayout container;
@@ -43,8 +69,27 @@ public final class QueueActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        store.setListener(this);
         // The service may have applied snapshots while we were away.
         refresh();
+        refreshHandler.postDelayed(refreshTick, REFRESH_INTERVAL_MS);
+    }
+
+    @Override
+    protected void onPause() {
+        // Both must come off here. The store is a process singleton, so a
+        // listener left registered would hold this activity for the life of
+        // the process, and the ticker would keep rebuilding views nobody is
+        // looking at.
+        store.setListener(null);
+        refreshHandler.removeCallbacks(refreshTick);
+        super.onPause();
+    }
+
+    /** Called by the store on the main thread when a snapshot or state arrives. */
+    @Override
+    public void onStoreChanged() {
+        render();
     }
 
     @Override

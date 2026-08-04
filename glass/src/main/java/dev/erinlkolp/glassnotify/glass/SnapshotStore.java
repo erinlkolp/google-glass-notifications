@@ -1,5 +1,7 @@
 package dev.erinlkolp.glassnotify.glass;
 
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -35,16 +37,73 @@ public final class SnapshotStore {
     private static final Snapshot EMPTY =
             new Snapshot(0L, new ArrayList<NotificationItem>());
 
+    /**
+     * Notified when what is on screen would change.
+     *
+     * A plain listener rather than a broadcast or an observer library: both
+     * ends live in the same process, and this has exactly one subscriber.
+     */
+    public interface Listener {
+        /** Always delivered on the main thread. */
+        void onStoreChanged();
+    }
+
     private final File cacheFile;
 
     private volatile Snapshot current = EMPTY;
     private volatile long lastContactElapsedMs = NEVER;
+
+    /** Created with the first listener, so the store stays constructible off-device. */
+    private Handler mainHandler; // guarded by this
+    private volatile Listener listener;
 
     public SnapshotStore(File cacheFile) {
         if (cacheFile == null) {
             throw new NullPointerException("cacheFile");
         }
         this.cacheFile = cacheFile;
+    }
+
+    /**
+     * Registers the one listener told about changes, or clears it with null.
+     *
+     * The store is a process-wide singleton, so a listener left registered
+     * outlives whatever registered it. The activity registers in onResume and
+     * clears in onPause, which is what keeps this from leaking it.
+     */
+    public synchronized void setListener(Listener listener) {
+        if (listener != null && mainHandler == null) {
+            mainHandler = new Handler(Looper.getMainLooper());
+        }
+        this.listener = listener;
+    }
+
+    /**
+     * Fans a change out on the main thread.
+     *
+     * apply() runs on the accept thread, and the listener redraws a view
+     * hierarchy, so the hop is mandatory rather than a nicety.
+     */
+    private void notifyChanged() {
+        Handler handler;
+        synchronized (this) {
+            if (listener == null) {
+                return;
+            }
+            handler = mainHandler;
+        }
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                // Re-read rather than capture: the activity may have paused
+                // between the post and the delivery, and this Runnable holds
+                // only the store, so nothing is kept alive by it.
+                Listener target = listener;
+                if (target != null) {
+                    target.onStoreChanged();
+                }
+            }
+        });
     }
 
     /** Never null. Returns an empty snapshot before anything has arrived. */
@@ -60,6 +119,10 @@ public final class SnapshotStore {
         current = snapshot;
         markContact();
         persist(snapshot);
+        // Without this the queue screen shows the previous item until the next
+        // swipe - and if the cursor is already at the end of the list, that
+        // swipe does not move and never redraws either.
+        notifyChanged();
     }
 
     /** Records that the phone is alive, without changing the queue. Called on PING. */
