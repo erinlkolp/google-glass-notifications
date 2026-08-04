@@ -92,6 +92,7 @@ public final class QueueActivity extends Activity {
     }
 
     private void handle(Swipe swipe) {
+        cursor.setSize(store.items().size());
         boolean moved = false;
         if (swipe == Swipe.FORWARD) {
             moved = cursor.next();
@@ -104,14 +105,17 @@ public final class QueueActivity extends Activity {
     }
 
     private void refresh() {
-        cursor.setSize(store.items().size());
         render();
     }
 
     private void render() {
         container.removeAllViews();
 
+        // Capture once: current is volatile and items is immutable, so this
+        // local cannot change under us even if the service swaps the snapshot.
         List<NotificationItem> items = store.items();
+        cursor.setSize(items.size());
+
         if (items.isEmpty()) {
             container.addView(CardRenderer.messageCard(this, getString(R.string.empty_queue)));
             return;

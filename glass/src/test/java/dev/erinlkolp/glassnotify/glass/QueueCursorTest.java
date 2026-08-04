@@ -106,4 +106,25 @@ public class QueueCursorTest {
         } catch (IllegalArgumentException expected) {
         }
     }
+
+    @Test
+    public void navigatingRightAfterAShrinkStaysInBounds() {
+        // Regression for QueueActivity going stale against SnapshotStore: the
+        // reader is on the last item of a 5-item queue, a smaller snapshot of
+        // 2 items arrives, and the very next navigation must land somewhere
+        // valid rather than relying on a size the caller forgot to refresh.
+        cursor.setSize(5);
+        cursor.next();
+        cursor.next();
+        cursor.next();
+        cursor.next();
+        assertEquals(4, cursor.index());
+
+        cursor.setSize(2);
+        cursor.previous();
+
+        int index = cursor.index();
+        assertTrue("index must stay within [0, 1] after the shrink, was " + index,
+                index >= 0 && index <= 1);
+    }
 }
