@@ -78,7 +78,6 @@ google-glass-notifications/
 └── phone/                       Android app, API 28
     └── .../phone/
         ├── SourceNotification.java  pure: Android-free notification data
-        ├── AllowRule.java           pure: package -> tier
         ├── SnapshotBuilder.java     pure: filter, tier, truncate, sort, cap
         ├── Backoff.java             pure: exponential delay sequence
         ├── AllowlistStore.java      SharedPreferences persistence
@@ -3539,13 +3538,12 @@ Every filtering, tiering, truncation and ordering decision lives here, in a clas
 - Create: `phone/src/main/AndroidManifest.xml`
 - Create: `phone/src/main/res/values/strings.xml`
 - Create: `phone/src/main/java/dev/erinlkolp/glassnotify/phone/SourceNotification.java`
-- Create: `phone/src/main/java/dev/erinlkolp/glassnotify/phone/AllowRule.java`
 - Create: `phone/src/main/java/dev/erinlkolp/glassnotify/phone/SnapshotBuilder.java`
 - Test: `phone/src/test/java/dev/erinlkolp/glassnotify/phone/SnapshotBuilderTest.java`
 
 **Interfaces:**
 - Consumes: `:wire`.
-- Produces: `SourceNotification(String key, String packageName, String appLabel, String title, String text, long postedAt, boolean ongoing)` with public final fields of those names; `AllowRule(String packageName, Tier tier)` with public final fields; `SnapshotBuilder.build(long snapshotId, List<SourceNotification> sources, Map<String, Tier> allowlist):Snapshot` (static).
+- Produces: `SourceNotification(String key, String packageName, String appLabel, String title, String text, long postedAt, boolean ongoing)` with public final fields of those names; `SnapshotBuilder.build(long snapshotId, List<SourceNotification> sources, Map<String, Tier> allowlist):Snapshot` (static).
 
 - [ ] **Step 1: Write `phone/build.gradle.kts`, manifest and strings**
 
@@ -3784,7 +3782,7 @@ public class SnapshotBuilderTest {
 Run: `./gradlew :phone:testDebugUnitTest`
 Expected: FAIL — `SourceNotification` and `SnapshotBuilder` do not exist.
 
-- [ ] **Step 4: Write `SourceNotification.java` and `AllowRule.java`**
+- [ ] **Step 4: Write `SourceNotification.java`**
 
 ```java
 package dev.erinlkolp.glassnotify.phone;
@@ -3836,29 +3834,6 @@ public final class SourceNotification {
 }
 ```
 
-```java
-package dev.erinlkolp.glassnotify.phone;
-
-import dev.erinlkolp.glassnotify.wire.Tier;
-
-/** One allowlist entry: this package, shown at this tier. */
-public final class AllowRule {
-
-    public final String packageName;
-    public final Tier tier;
-
-    public AllowRule(String packageName, Tier tier) {
-        if (packageName == null) {
-            throw new NullPointerException("packageName");
-        }
-        if (tier == null) {
-            throw new NullPointerException("tier");
-        }
-        this.packageName = packageName;
-        this.tier = tier;
-    }
-}
-```
 
 - [ ] **Step 5: Write `SnapshotBuilder.java`**
 
