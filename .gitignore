@@ -20,3 +20,6 @@ local.properties
 # Brainstorming companion scratch. Note the sdd/ ledger is deliberately NOT
 # ignored - the gesture launcher retains its per-task reports in git.
 .superpowers/brainstorm/
+
+# Local Claude Code settings
+.claude/settings.local.json
