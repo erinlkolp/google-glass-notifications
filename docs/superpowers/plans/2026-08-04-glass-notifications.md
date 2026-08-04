@@ -162,6 +162,11 @@ plugins {
 org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
 android.useAndroidX=false
 org.gradle.parallel=true
+
+# The Java 8 source/target is deliberate and load-bearing - the Glass device is
+# API 22 - so JDK 21's warning about it is noise about a decision that is not
+# going to change.
+android.javaCompile.suppressSourceTargetDeprecationWarning=true
 ```
 
 `wire/build.gradle.kts`:
