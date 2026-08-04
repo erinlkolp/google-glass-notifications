@@ -36,6 +36,16 @@ public final class LinkServerService extends Service {
 
     private static final String TAG = "GlassNotify";
 
+    /**
+     * How long to idle before re-arming the listener after a failure.
+     *
+     * A plain sleep rather than the phone's exponential Backoff: Glass is the
+     * passive side, so there is no cost to re-arming promptly, and a growing
+     * delay here would only make the phone's own retry look broken. The point
+     * is purely to stop the loop spinning.
+     */
+    private static final long RETRY_DELAY_MS = 5_000L;
+
     private volatile boolean running;
     private Thread acceptThread;
     private volatile BluetoothServerSocket serverSocket;
@@ -108,7 +118,7 @@ public final class LinkServerService extends Service {
             BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
             if (adapter == null || !adapter.isEnabled()) {
                 // Bluetooth is off. Idle rather than spinning a retry loop.
-                sleepQuietly(5_000L);
+                sleepQuietly(RETRY_DELAY_MS);
                 continue;
             }
 
@@ -117,10 +127,11 @@ public final class LinkServerService extends Service {
                         Protocol.SERVICE_NAME, Protocol.SERVICE_UUID);
             } catch (IOException e) {
                 Log.w(TAG, "could not open server socket", e);
-                sleepQuietly(5_000L);
+                sleepQuietly(RETRY_DELAY_MS);
                 continue;
             }
 
+            boolean acceptFailed = false;
             BluetoothSocket socket = null;
             try {
                 socket = serverSocket.accept();
@@ -128,12 +139,25 @@ public final class LinkServerService extends Service {
                 connectedSocket = socket;
                 serve(socket);
             } catch (IOException e) {
+                acceptFailed = true;
                 if (running) {
                     Log.w(TAG, "accept failed", e);
                 }
             } finally {
                 closeConnectedSocket();
                 closeServerSocket();
+            }
+
+            if (acceptFailed && running) {
+                // The listen path already backed off; this one did not, so an
+                // accept() that failed immediately fell straight back to the
+                // top and spun listen/accept/close plus a log line as fast as
+                // the CPU allowed - on the device with the smallest battery in
+                // the system. Reachable during a Bluetooth adapter toggle,
+                // where isEnabled() above still passes and accept() then
+                // fails. Sleeping after the finally rather than inside the
+                // catch keeps the sockets closed while we wait.
+                sleepQuietly(RETRY_DELAY_MS);
             }
         }
     }
