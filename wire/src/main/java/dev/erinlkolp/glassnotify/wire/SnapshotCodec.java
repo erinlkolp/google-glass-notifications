@@ -5,6 +5,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.io.UTFDataFormatException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -66,25 +67,42 @@ public final class SnapshotCodec {
      *
      * Items are newest-first, so the oldest is the last one - which is also
      * the one the wearer is least likely to be looking for.
+     *
+     * Every attempt is inside the loop, including the first. Being oversized is
+     * not the only way {@link #encode} can fail: a single field over 65535 UTF-8
+     * bytes raises {@code UTFDataFormatException} from {@code writeUTF}, and
+     * more than {@link Protocol#MAX_ITEMS} items raises {@link
+     * ProtocolException}. Both are {@code IOException}s, so an unguarded first
+     * attempt would throw one straight at the writer - and that lands in exactly
+     * the unrecoverable loop this method exists to prevent, since the reconnect
+     * re-sends the identical snapshot. {@code SnapshotBuilder} caps every field
+     * and the item count, so none of this is reachable today; it is the second
+     * layer, and a second layer with a hole in it is not one.
      */
     public static byte[] encodeWithinFrame(Snapshot snapshot) throws IOException {
-        byte[] encoded = encode(snapshot);
-        if (encoded.length <= FrameCodec.MAX_BODY_BYTES) {
-            return encoded;
-        }
-
         List<NotificationItem> items =
                 new ArrayList<NotificationItem>(snapshot.items);
-        while (!items.isEmpty()) {
-            items.remove(items.size() - 1);
-            encoded = encode(new Snapshot(snapshot.snapshotId, items));
-            if (encoded.length <= FrameCodec.MAX_BODY_BYTES) {
-                return encoded;
+        while (true) {
+            try {
+                byte[] encoded = encode(new Snapshot(snapshot.snapshotId, items));
+                if (encoded.length <= FrameCodec.MAX_BODY_BYTES) {
+                    return encoded;
+                }
+            } catch (ProtocolException tooMany) {
+                // Over MAX_ITEMS. Dropping the tail is the same remedy.
+            } catch (UTFDataFormatException tooLong) {
+                // One field past writeUTF's own 65535-byte ceiling.
             }
+            if (items.isEmpty()) {
+                // An empty snapshot is a fixed ten bytes and has no strings to
+                // overflow, so it always encodes and always fits: this is
+                // unreachable. Kept so the loop provably terminates rather
+                // than indexing off the end of an empty list.
+                throw new ProtocolException(
+                        "snapshot " + snapshot.snapshotId + " will not encode even when empty");
+            }
+            items.remove(items.size() - 1);
         }
-        // An empty snapshot is a fixed ten bytes, so the loop above always
-        // returns before falling through. Kept so the compiler agrees.
-        return encoded;
     }
 
     public static Snapshot decode(byte[] body) throws IOException {

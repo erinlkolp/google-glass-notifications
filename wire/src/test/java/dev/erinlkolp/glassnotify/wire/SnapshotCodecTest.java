@@ -150,6 +150,63 @@ public class SnapshotCodecTest {
     }
 
     @Test
+    public void encodeWithinFrameDegradesRatherThanThrowingOverTheItemCap() throws IOException {
+        // encode() rejects more than MAX_ITEMS with a ProtocolException. That
+        // used to escape encodeWithinFrame, because the first encode() call sat
+        // outside the degradation loop - an IOException at the writer, which
+        // drops the link, reconnects, and re-sends the identical snapshot.
+        // Exactly the unrecoverable loop this method exists to prevent.
+        List<NotificationItem> items = new ArrayList<NotificationItem>();
+        for (int i = 0; i < Protocol.MAX_ITEMS + 5; i++) {
+            items.add(item("key-" + i, Tier.QUEUE));
+        }
+
+        Snapshot decoded = SnapshotCodec.decode(
+                SnapshotCodec.encodeWithinFrame(new Snapshot(9L, items)));
+
+        assertEquals(9L, decoded.snapshotId);
+        assertEquals(Protocol.MAX_ITEMS, decoded.items.size());
+        // Newest survive, oldest go - the same tail-first rule as the size path.
+        assertEquals("key-0", decoded.items.get(0).key);
+        assertEquals("key-" + (Protocol.MAX_ITEMS - 1),
+                decoded.items.get(Protocol.MAX_ITEMS - 1).key);
+    }
+
+    @Test
+    public void encodeWithinFrameDegradesRatherThanThrowingOnAnUnencodableField()
+            throws IOException {
+        // writeUTF has its own 65535-byte ceiling and raises
+        // UTFDataFormatException, not an oversized byte[], so the length check
+        // alone never sees this one. It has to be caught, not measured.
+        List<NotificationItem> items = new ArrayList<NotificationItem>();
+        items.add(item("keep-me", Tier.QUEUE));
+        items.add(new NotificationItem("too-big", "Signal", "Jordan Reyes",
+                repeat('x', 70_000), 1785870000000L, Tier.QUEUE));
+
+        byte[] encoded = SnapshotCodec.encodeWithinFrame(new Snapshot(11L, items));
+
+        assertTrue(encoded.length <= FrameCodec.MAX_BODY_BYTES);
+        Snapshot decoded = SnapshotCodec.decode(encoded);
+        assertEquals(1, decoded.items.size());
+        assertEquals("keep-me", decoded.items.get(0).key);
+    }
+
+    @Test
+    public void encodeWithinFrameDropsToEmptyWhenTheNewestItemIsUnencodable()
+            throws IOException {
+        // Nothing is salvageable here: the offending item is the newest, so
+        // degradation runs all the way to empty. Glass showing "Nothing
+        // waiting" is recoverable; a wedged link is not.
+        List<NotificationItem> items = new ArrayList<NotificationItem>();
+        items.add(new NotificationItem("too-big", "Signal", repeat('x', 70_000),
+                "text", 1785870000000L, Tier.QUEUE));
+
+        byte[] encoded = SnapshotCodec.encodeWithinFrame(new Snapshot(12L, items));
+
+        assertEquals(0, SnapshotCodec.decode(encoded).items.size());
+    }
+
+    @Test
     public void rejectsAnItemCountOverTheCap() throws IOException {
         ByteArrayOutputStream raw = new ByteArrayOutputStream();
         DataOutputStream d = new DataOutputStream(raw);
