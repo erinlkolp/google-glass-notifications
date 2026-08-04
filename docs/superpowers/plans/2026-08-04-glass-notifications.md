@@ -2585,8 +2585,22 @@ public final class GlassNotify {
 
     private static SnapshotStore store;
     private static PeerPin peerPin;
+    private static InterruptOverlay overlay;
 
     private GlassNotify() {
+    }
+
+    /**
+     * One overlay for the whole process, so a second interrupt arriving while
+     * the first is still showing replaces it and restarts the timer instead of
+     * stacking a second window. Shared by the link service and the debug
+     * receiver alike — each constructing its own would defeat the collapsing.
+     */
+    public static synchronized InterruptOverlay overlay(Context context) {
+        if (overlay == null) {
+            overlay = new InterruptOverlay(context.getApplicationContext());
+        }
+        return overlay;
     }
 
     public static synchronized SnapshotStore store(Context context) {
@@ -3056,7 +3070,19 @@ public final class LinkServerService extends Service {
 
     private volatile boolean running;
     private Thread acceptThread;
-    private BluetoothServerSocket serverSocket;
+
+    // Volatile: written on the accept thread, read from the main thread in
+    // onDestroy() with no other happens-before edge between them.
+    private volatile BluetoothServerSocket serverSocket;
+
+    /**
+     * The socket of the connection currently being served, for the whole time
+     * serve() is running; null otherwise. Closing it from onDestroy() is what
+     * unblocks a FrameCodec.read() the accept thread is sitting in — the
+     * listening serverSocket is already closed and gone by the time a
+     * connection is being served, so it cannot do that job.
+     */
+    private volatile BluetoothSocket connectedSocket;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private InterruptOverlay overlay;
@@ -3071,7 +3097,7 @@ public final class LinkServerService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        overlay = new InterruptOverlay(this);
+        overlay = GlassNotify.overlay(this);
         GlassNotify.store(this);
     }
 
@@ -3095,6 +3121,7 @@ public final class LinkServerService extends Service {
     public void onDestroy() {
         running = false;
         closeServerSocket();
+        closeConnectedSocket();
         super.onDestroy();
         main.post(new Runnable() {
             @Override
@@ -3131,13 +3158,16 @@ public final class LinkServerService extends Service {
             try {
                 socket = serverSocket.accept();
                 closeServerSocket();
+                // Publish before serving, so onDestroy() can close it and
+                // unblock the read() this thread is about to sit in.
+                connectedSocket = socket;
                 serve(socket);
             } catch (IOException e) {
                 if (running) {
                     Log.w(TAG, "accept failed", e);
                 }
             } finally {
-                closeQuietly(socket);
+                closeConnectedSocket();
                 closeServerSocket();
             }
         }
@@ -3238,7 +3268,9 @@ public final class LinkServerService extends Service {
         }
     }
 
-    private static void closeQuietly(BluetoothSocket socket) {
+    private void closeConnectedSocket() {
+        BluetoothSocket socket = connectedSocket;
+        connectedSocket = null;
         if (socket != null) {
             try {
                 socket.close();
@@ -3371,7 +3403,7 @@ public final class DebugInjectReceiver extends BroadcastReceiver {
 
     /** Runs the same interrupt path the real link service uses. */
     private void notifyUi(final Context context, final Snapshot previous, final Snapshot next) {
-        final InterruptOverlay overlay = new InterruptOverlay(context);
+        final InterruptOverlay overlay = GlassNotify.overlay(context);
         new Handler(Looper.getMainLooper()).post(new Runnable() {
             @Override
             public void run() {
