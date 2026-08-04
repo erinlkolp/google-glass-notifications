@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Glass Notifications</string>
+    <string name="channel_link">Glass link</string>
+    <string name="status_connected">Connected to Glass</string>
+    <string name="status_connecting">Connecting to Glass…</string>
+    <string name="status_no_bluetooth">Bluetooth is off</string>
+    <string name="status_not_bonded">Glass is not paired</string>
+    <string name="grant_notification_access">Grant notification access</string>
+    <string name="grant_battery_exemption">Allow running in the background</string>
+    <string name="configure_allowlist">Choose which apps to show</string>
+</resources>
