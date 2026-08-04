@@ -4174,7 +4174,13 @@ public final class SnapshotBus {
     private final Runnable deliver = new Runnable() {
         @Override
         public void run() {
-            pending = false;
+            synchronized (SnapshotBus.this) {
+                // Cleared before the listener runs, so an exception thrown out
+                // of onSnapshot cannot wedge the bus permanently.
+                pending = false;
+            }
+            // Re-read rather than capturing at schedule time, so a
+            // setListener(null) during teardown is a clean no-op.
             Listener target = listener;
             if (target != null) {
                 target.onSnapshot(latest);
@@ -4198,13 +4204,23 @@ public final class SnapshotBus {
         this.listener = listener;
     }
 
-    /** Replaces the current snapshot and schedules a debounced delivery. */
+    /**
+     * Replaces the current snapshot and schedules a debounced delivery.
+     * Safe to call from any thread.
+     */
     public void publish(Snapshot snapshot) {
         latest = snapshot;
-        if (!pending) {
+        // The check-then-act must be atomic, or two racing callers both see
+        // pending == false and double-schedule, defeating the coalescing.
+        synchronized (this) {
+            if (pending) {
+                return;
+            }
             pending = true;
-            handler.postDelayed(deliver, DEBOUNCE_MS);
         }
+        // Deliberately outside the lock: no need to hold one across a
+        // framework call, and pending already guarantees one scheduling wins.
+        handler.postDelayed(deliver, DEBOUNCE_MS);
     }
 }
 ```
