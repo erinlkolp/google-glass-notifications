@@ -458,10 +458,13 @@ Carried forward from the gesture launcher's gotchas, and **not optional**:
 
 - Install `openjdk-N-jdk-headless`, not the JRE package — the JRE lacks `lib/ct.sym`, which breaks
   Gradle's `options.release = 8` with a misleading error.
-- d8 8.2.2-dev (build-tools 34.0.0) NPEs on any enum compiled by JDK 21 javac. The protocol uses a
-  `tier` enum, so **this will be hit.** Workaround: strip the `MethodParameters` attribute from jar
-  copies before invoking d8. Alternatively represent `tier` as an int constant in `wire` to sidestep
-  it entirely — to be decided during planning.
+- d8 8.2.2-dev (build-tools 34.0.0) NPEs on any enum compiled by JDK 21 javac. **This does not affect
+  this project.** Verified 2026-08-04: the bug only afflicts *direct* invocation of the build-tools
+  `d8` binary, which is why the gesture launcher's workaround lives solely in `daemon/build.gradle.kts`
+  — the module that shells out to it for `app_process`. AGP uses its own bundled dexer, and the
+  launcher's AGP-built `app` module consumes `gesture-core`'s `Gesture` and `TouchPhase` enums and
+  builds cleanly. Both modules here are AGP-built apps with no manual dexing, so `Tier` is an ordinary
+  enum and no jar rewriting is needed.
 - The device shell lacks `head`, `which`, `pidof`, and `sed`. Pipe to the host instead.
 
 ---
@@ -493,9 +496,7 @@ None blocking. To confirm during implementation:
    data model (per-app, with tier) is fixed by §7.3 and §8. Note the phone's setup screen can detect
    whether access has been granted by reading `settings get secure enabled_notification_listeners`,
    a colon-separated list of `package/class` entries.
-4. **The `tier` enum will trigger the d8 NPE** described in §12.6, since `wire` is dexed into both
-   apps. Decide during planning between the `MethodParameters`-stripping workaround and representing
-   `tier` as an int constant.
+4. *(Resolved — see §14.1.)*
 
 ### 14.1 Resolved during design
 
@@ -506,3 +507,5 @@ None blocking. To confirm during implementation:
   adb start-server` with the phone unlocked; the RSA prompt is suppressed on the lock screen.
 - **udev.** Not needed. `/etc/udev/rules.d/51-android.rules` matches only Google's `18d1`, but the LG
   node came up `root plugdev` with a `uaccess` ACL from a systemd default, and adb connected fine.
+- **The d8 enum NPE does not apply here.** It only affects direct invocation of the build-tools `d8`
+  binary. Neither module does manual dexing, so `Tier` stays an ordinary enum. See §12.6.
