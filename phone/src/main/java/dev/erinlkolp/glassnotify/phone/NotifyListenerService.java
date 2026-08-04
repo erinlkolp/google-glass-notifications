@@ -34,6 +34,20 @@ public final class NotifyListenerService extends NotificationListenerService {
         LinkClientService.start(this);
     }
 
+    /**
+     * Notification access was revoked, or the system is unbinding us.
+     *
+     * Without this the link service outlives its only source of snapshots and
+     * carries on as a foreground service, pinging Glass every 10s and holding
+     * a frozen queue on screen that the wearer has no way of telling is dead.
+     */
+    @Override
+    public void onListenerDisconnected() {
+        super.onListenerDisconnected();
+        Log.i(TAG, "listener disconnected, stopping the link");
+        LinkClientService.stop(this);
+    }
+
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
         republish();

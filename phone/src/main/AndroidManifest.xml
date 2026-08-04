@@ -4,7 +4,11 @@
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!--
+      No RECEIVE_BOOT_COMPLETED: this module has no boot receiver. Boot
+      coverage comes from the system rebinding NotifyListenerService, which
+      starts the link service from onListenerConnected.
+    -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application

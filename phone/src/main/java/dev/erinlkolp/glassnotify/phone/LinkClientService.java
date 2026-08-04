@@ -127,6 +127,11 @@ public final class LinkClientService extends Service implements SnapshotBus.List
         context.startService(new Intent(context, LinkClientService.class));
     }
 
+    /** Tears the link down. Used when the source of snapshots goes away. */
+    public static void stop(Context context) {
+        context.stopService(new Intent(context, LinkClientService.class));
+    }
+
     /** Cuts the current backoff short. Called when Glass comes into range. */
     public static void wake(Context context) {
         Intent intent = new Intent(context, LinkClientService.class);
