@@ -68,6 +68,23 @@ public final class LinkClientService extends Service implements SnapshotBus.List
     /** How long to idle when there is no bonded Glass to connect to at all. */
     private static final long NO_DEVICE_RETRY_MS = 10_000L;
 
+    /**
+     * How many PINGs a session must complete before the backoff is reset.
+     *
+     * A bare connect() is not proof of a working session. Glass accepts the
+     * socket before it has checked either the MAC pin or the protocol version,
+     * and closes it immediately afterwards in both cases. Resetting on
+     * connect() therefore reads those two failures as success and pins the
+     * retry interval at Backoff.INITIAL_MS forever: connect, reset, HELLO,
+     * Glass closes, PING fails, ~1s wait, repeat - at full duty cycle, in
+     * exactly the situations the exponential backoff exists for.
+     *
+     * A PING that completes without an IOException means Glass held the link
+     * for at least PING_INTERVAL_MS, which neither of those paths does. One is
+     * enough; asking for more only delays recovery from a genuine dropout.
+     */
+    private static final int HEALTHY_SESSION_PINGS = 1;
+
     private final Backoff backoff = new Backoff();
 
     private volatile boolean running;
@@ -209,7 +226,9 @@ public final class LinkClientService extends Service implements SnapshotBus.List
                     return;
                 }
 
-                backoff.reset();
+                // Note: no backoff.reset() here. See HEALTHY_SESSION_PINGS -
+                // the reset happens in pump(), once the session has proven it
+                // is more than an accept() Glass is about to hang up on.
                 status(R.string.status_connected);
                 pump(attempt);
             } catch (IOException e) {
@@ -251,6 +270,7 @@ public final class LinkClientService extends Service implements SnapshotBus.List
         writeSnapshot(connected, SnapshotBus.get().latest());
 
         long nextPingAt = SystemClock.elapsedRealtime() + PING_INTERVAL_MS;
+        int successfulPings = 0;
 
         while (running) {
             boolean snapshotDue =
@@ -266,6 +286,12 @@ public final class LinkClientService extends Service implements SnapshotBus.List
             if (SystemClock.elapsedRealtime() >= nextPingAt) {
                 writeFrame(connected, MessageType.PING, NO_BODY);
                 nextPingAt = SystemClock.elapsedRealtime() + PING_INTERVAL_MS;
+
+                if (successfulPings < HEALTHY_SESSION_PINGS
+                        && ++successfulPings == HEALTHY_SESSION_PINGS) {
+                    // The session is real, not an accept() Glass refused.
+                    backoff.reset();
+                }
             }
         }
     }
