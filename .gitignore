@@ -1,0 +1,22 @@
+# Gradle
+.gradle/
+build/
+local.properties
+
+# Android build outputs
+*.apk
+*.ap_
+*.dex
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+
+# Brainstorming companion scratch. Note the sdd/ ledger is deliberately NOT
+# ignored - the gesture launcher retains its per-task reports in git.
+.superpowers/brainstorm/
