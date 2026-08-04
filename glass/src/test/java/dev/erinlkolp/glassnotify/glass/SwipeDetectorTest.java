@@ -65,6 +65,17 @@ public class SwipeDetectorTest {
     }
 
     @Test
+    public void aSwipeInsideTheDominanceBandIsRejected() {
+        // dx=60, dy=55 is the band where the two candidate rules disagree.
+        // A naive absDx > absDy accepts it; the ratio rule this detector
+        // documents rejects it, because 60 < 55 * 1.2. The distinction is not
+        // cosmetic - the pad is anisotropic, so a movement that looks
+        // horizontal in view coordinates need not be one on the glass. If a
+        // later change reverts to comparing raw dx to raw dy, this fails.
+        assertEquals(Swipe.NONE, gesture(200f, 260f, 100f, 155f, 250L));
+    }
+
+    @Test
     public void cancellingDiscardsTheGestureInProgress() {
         detector.begin(new TouchSample(200f, 100f, 0L));
         detector.move(new TouchSample(400f, 100f, 100L));
