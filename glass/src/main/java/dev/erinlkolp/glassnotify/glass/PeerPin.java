@@ -1,6 +1,7 @@
 package dev.erinlkolp.glassnotify.glass;
 
 import android.content.SharedPreferences;
+import android.util.Log;
 
 /**
  * Trust-on-first-use pinning for the phone's Bluetooth address.
@@ -15,6 +16,8 @@ import android.content.SharedPreferences;
  * `adb shell pm clear dev.erinlkolp.glassnotify.glass` clears this.
  */
 public final class PeerPin {
+
+    private static final String TAG = "GlassNotify";
 
     private static final String KEY_ADDRESS = "pinned_peer_address";
 
@@ -47,11 +50,18 @@ public final class PeerPin {
             throw new NullPointerException("address");
         }
         if (pinnedAddress() == null) {
-            prefs.edit().putString(KEY_ADDRESS, address).commit();
+            // A silently dropped write means nothing is ever pinned, so
+            // isAllowed() returns true for every device forever - this control
+            // fails open, and it must not do so without a trace.
+            if (!prefs.edit().putString(KEY_ADDRESS, address).commit()) {
+                Log.w(TAG, "could not pin peer address; every device stays trusted");
+            }
         }
     }
 
     public void clear() {
-        prefs.edit().remove(KEY_ADDRESS).commit();
+        if (!prefs.edit().remove(KEY_ADDRESS).commit()) {
+            Log.w(TAG, "could not clear the pinned peer address");
+        }
     }
 }
