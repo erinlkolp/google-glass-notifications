@@ -271,7 +271,7 @@ public final class LinkClientService extends Service implements SnapshotBus.List
         // Glass has whatever it cached from last time; replace it immediately.
         // Anything flagged while we were connecting is subsumed by this, since
         // latest() is by definition at least as new.
-        takePendingSnapshot();
+        clearPendingSnapshot();
         writeSnapshot(connected, SnapshotBus.get().latest());
 
         long nextPingAt = SystemClock.elapsedRealtime() + PING_INTERVAL_MS;
@@ -408,7 +408,7 @@ public final class LinkClientService extends Service implements SnapshotBus.List
     }
 
     /** Clears any pending flag without acting on it. */
-    private void takePendingSnapshot() {
+    private void clearPendingSnapshot() {
         synchronized (wakeLock) {
             snapshotPending = false;
         }
