@@ -2514,6 +2514,10 @@ public final class QueueActivity extends Activity {
     }
 
     private void handle(Swipe swipe) {
+        // The service thread can swap the snapshot at any moment, so judge the
+        // move against the real size rather than a remembered one.
+        cursor.setSize(store.items().size());
+
         boolean moved = false;
         if (swipe == Swipe.FORWARD) {
             moved = cursor.next();
@@ -2526,14 +2530,20 @@ public final class QueueActivity extends Activity {
     }
 
     private void refresh() {
-        cursor.setSize(store.items().size());
         render();
     }
 
     private void render() {
         container.removeAllViews();
 
+        // Capture once. SnapshotStore.current is volatile and Snapshot.items is
+        // immutable, so this local cannot change underneath us even if the
+        // service swaps the snapshot mid-render. Sizing the cursor from the same
+        // local is what makes the subsequent get() safe rather than merely
+        // unlikely to fail.
         List<NotificationItem> items = store.items();
+        cursor.setSize(items.size());
+
         if (items.isEmpty()) {
             container.addView(CardRenderer.messageCard(this, getString(R.string.empty_queue)));
             return;
