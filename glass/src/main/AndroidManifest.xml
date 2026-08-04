@@ -22,6 +22,26 @@
             </intent-filter>
         </activity>
 
+        <service
+            android:name=".LinkServerService"
+            android:exported="false" />
+
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".DebugInjectReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="dev.erinlkolp.glassnotify.DEBUG_INJECT" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>

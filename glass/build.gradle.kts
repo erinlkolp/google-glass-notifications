@@ -17,6 +17,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_1_8
     }
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     buildTypes {
         release { isMinifyEnabled = false }
     }

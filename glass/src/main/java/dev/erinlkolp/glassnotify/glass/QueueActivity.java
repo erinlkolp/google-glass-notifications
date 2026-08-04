@@ -31,6 +31,7 @@ public final class QueueActivity extends Activity {
         super.onCreate(savedInstanceState);
 
         store = GlassNotify.store(this);
+        LinkServerService.start(this);
 
         container = new FrameLayout(this);
         setContentView(container);
