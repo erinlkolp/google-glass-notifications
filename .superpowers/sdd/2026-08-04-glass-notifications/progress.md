@@ -314,3 +314,55 @@ framework. Legitimate to skip for a targeted regression fix, but it is an
 AVOIDABLE limitation, not an unavoidable one. Carried as a minor.
 
 === ALL CODE COMPLETE — 102 tests, both APKs build ===
+
+=== HARDWARE BRING-UP 2026-08-04 (Erin, both devices) ===
+VERIFIED WORKING END TO END: a real Discord notification reached the Glass prism.
+Confirmed on hardware:
+- Interrupt overlay renders correctly on the see-through prism (glanceable card,
+  pure black/white, legible).
+- ACQUIRE_CAUSES_WAKEUP genuinely wakes the display from TRUE SLEEP on LMY49J.
+  Measured objectively, not by eye: dumpsys power went mWakefulness=Asleep /
+  Display Power: state=OFF -> mWakefulness=Awake with mLastWakeTime matching the
+  injection. This was the single biggest unverified assumption in the design —
+  the whole interrupt tier depended on it.
+- Bond, RFCOMM connect, HELLO handshake and SNAPSHOT delivery all work.
+- Reconnect works: force-stopping the phone app and relaunching produced a fresh
+  handshake on Glass within seconds.
+- SnapshotStore.load() correctly restores the disk cache into a fresh process
+  (verified 2 items restored + 1 new = "queue now 3" on a new PID).
+- Clocks agree to the second across devices, so the "N MIN AGO" labels are right.
+
+BUGS FOUND AND FIXED AT BRING-UP:
+- scripts/fake-notify.sh passed values containing spaces to `adb shell` without
+  quoting them for the DEVICE's shell. Local quotes are consumed locally; the
+  remote shell word-split, so `am` took "Jordan" as the extra and parsed the
+  stray "Reyes" as a PACKAGE FILTER — the broadcast matched no receiver and did
+  nothing, with `pkg=Reyes` in am's echo as the only clue. The app was fine; the
+  tooling was broken. Same class as the glass-pull quoting note, which was in
+  project memory and still got written wrong. Fixed by quoting every token a
+  second time with close-escape-reopen for embedded single quotes, so labels
+  like "Bob's Phone" survive. NOTE: no code review could have caught this — every
+  review looked at a diff, the script's own usage example was correct, and the
+  defect only exists at runtime on the far side of adb. Argues that the spec's
+  "real-hardware testing is mandatory" rule should cover the TOOLING too.
+
+BEHAVIOURS THAT LOOK LIKE BUGS AND ARE NOT (document these):
+- Once the phone connects it OWNS the queue: its snapshot replaces everything,
+  so fake-notify items are wiped. The two feeds are mutually exclusive by design.
+- `am force-stop` puts the package in Android's stopped state, and stopped
+  packages receive no broadcasts — fake-notify then silently no-ops.
+- HELLO reports the phone's address as 02:00:00:00:00:00 (Android 6+ redacts
+  getAddress from apps). Harmless: Glass pins the REAL MAC from the socket's
+  remote device, which logged correctly as 10:F1:F2:EE:90:8F.
+- Spotify/YouTube media notifications never appear: they are FLAG_ONGOING_EVENT
+  and are deliberately dropped as persistent status rather than events.
+
+STILL OUTSTANDING (Erin, in the field, untethered):
+- Real-finger paging through the queue, especially swipes near the top of the
+  touchpad, to confirm the status bar does not steal them (IMMERSIVE_STICKY).
+- Dismiss-on-phone -> disappears-from-Glass (the removal path).
+- Out-of-range reconnect behaviour WITH notifications arriving. A quiet phone
+  cannot distinguish the fixed backoff from the broken one.
+- Boot persistence on Glass.
+- Tuning the starting-value constants, then recording them in spec 14 and
+  README 13.
