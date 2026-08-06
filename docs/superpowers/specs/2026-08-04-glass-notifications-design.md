@@ -340,6 +340,36 @@ achieve this — it only dims navigation icons.
 
 Text is additionally kept clear of the top 38px band regardless.
 
+### 9.5 The interrupt card must outrank the keyguard
+
+Added 2026-08-05 after a day of real use. The original spec described the card's
+appearance in detail and never considered the lock screen, which is where it failed.
+
+**Symptom:** with the display asleep and locked, an interrupt woke the screen to the lock
+screen and it went straight back off, with no card. The notification was firing correctly
+and rendering into a layer *underneath* the keyguard.
+
+Measured with `dumpsys window windows` rather than reasoned about:
+
+```
+StatusBar        mBaseLayer=151000   <- draws the keyguard on 5.x
+KeyguardScrim    mBaseLayer=131000
+overlay          mBaseLayer=101000   <- TYPE_SYSTEM_ALERT
+```
+
+`FLAG_SHOW_WHEN_LOCKED` does **not** fix this, and the reason is worth recording so it is
+not tried again: that flag controls whether the keyguard force-*hides* a window. On 5.x
+the keyguard is a window stacked above, so not being hidden does not stop being painted
+over.
+
+**The overlay therefore uses `TYPE_SYSTEM_ERROR`**, which lands at `221000` — above both.
+Verified on hardware with `isStatusBarKeyguard=true` at the moment of firing.
+
+**Accepted trade-off:** at 221000 the card draws above *everything*, system dialogs
+included. On a head-mounted display that is arguably correct precedence — an interrupt
+exists to win — but it is a stronger claim than `TYPE_SYSTEM_ALERT` was making, and it is
+deliberate rather than incidental.
+
 ---
 
 ## 10. Lifecycle
