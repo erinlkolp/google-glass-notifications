@@ -339,6 +339,90 @@ notification actually fires.
 Once all four are done, `SetupActivity.onResume()` starts `LinkClientService` automatically as soon
 as notification access is detected — there is no separate "connect" button.
 
+### 8.1 Moving to a different phone
+
+The steps above assume a first-time setup on the V30. Swapping in a different phone adds two
+gotchas, and **both fail silently** — nothing errors, the setup screen looks fine, and no
+notification ever arrives.
+
+**Gotcha 1: Glass is pinned to the old phone's MAC.**
+
+`PeerPin` is trust-on-first-use (§12, spec §11.1): the first device to connect is remembered, and
+every later connection is checked against it and refused on mismatch. A new phone gets rejected
+before a single frame is read.
+
+The reason this is so confusing in practice: **the new phone will say "Connected to Glass" anyway.**
+`LinkClientService` sets that status the moment TCP-level `connect()` succeeds, before any data is
+exchanged, and the protocol has no reverse channel (spec §7.4) — so the phone genuinely cannot learn
+it was rejected. Only Glass knows:
+
+```bash
+adb -s 0123456789ABCDEF logcat -s GlassNotify   # look for "refusing connection from unpinned device"
+```
+
+Clear the pin, then **launch the Glass app once** — `pm clear` also returns the package to Android's
+stopped state, and stopped packages receive no broadcasts, so the boot receiver stays dormant until
+something launches it:
+
+```bash
+adb -s 0123456789ABCDEF shell pm clear dev.erinlkolp.glassnotify.glass
+adb -s 0123456789ABCDEF shell am start -n dev.erinlkolp.glassnotify.glass/.QueueActivity
+```
+
+This also wipes the cached queue, which is disposable — the phone replaces it wholesale on the next
+snapshot anyway.
+
+**Gotcha 2: Android 13+ blocks notification access for sideloaded apps.**
+
+Since Android 13, an app installed from outside an app store is placed under **"Restricted
+settings"**, and the OS specifically greys out the two most powerful toggles — Accessibility and
+**Notification Listener access**. That second one is the permission this entire project depends on.
+
+The toggle refuses with a "Restricted setting" message and no obvious remedy. The unlock is buried
+in an overflow menu:
+
+> **Settings → Apps → Glass Notifications → ⋮ (top right) → Allow restricted settings**
+
+Do this **before** attempting step 2 above, or you will conclude the app is broken.
+
+This did not exist on Android 9, so it never came up on the V30.
+
+**Full migration order**
+
+1. Sideload `phone-debug.apk` (allow installs from unknown sources)
+2. **Allow restricted settings** on the app — gotcha 2
+3. Grant notification access (step 2 above)
+4. Grant the battery exemption (step 3 above)
+5. Pair the new phone with Glass (step 1 above)
+6. **Clear Glass's pin and relaunch the Glass app** — gotcha 1
+7. Configure the allowlist (step 4 above)
+8. Test with something you can trigger on demand
+
+**If the new phone is your primary rather than a carried relay**
+
+Two things change, and neither is a code change:
+
+- **SMS and calls start appearing**, because the source phone finally has your SIM. That is new
+  surface that never existed on the V30, and it probably deserves `INTERRUPT` while most other
+  things do not.
+- **The allowlist matters much more.** On a relay phone it only ever saw the accounts you had
+  bothered signing into, which was an accidental filter. On a primary, *everything* routes through
+  it. Start deliberately narrow and add, rather than starting broad and subtracting — the failure
+  mode of a too-broad allowlist is marketing email waking the prism every few minutes, which is
+  exactly what the tiered design exists to prevent.
+
+**On modern Android generally**
+
+The APK should install and run untouched: `targetSdk 28` keeps it on legacy Bluetooth permission
+behaviour, so there is no runtime `BLUETOOTH_CONNECT` flow to implement, and Android 14+ only blocks
+installing apps targeting below API 23. See "Known limitations and parked items" for what breaks the
+day `targetSdk` is raised.
+
+The real risk is not the API level, it is **OEM battery management**. Samsung and Xiaomi are far more
+aggressive at killing background services than stock Android, and Samsung keeps a separate "Sleeping
+apps" list that the battery-optimisation exemption does not cover. Motorola and Pixel are close to
+stock and generally need nothing beyond step 3.
+
 ---
 
 ## 9. Developing the Glass UI without the phone
