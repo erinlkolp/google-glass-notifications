@@ -56,6 +56,10 @@ public final class LinkServerService extends Service implements BatteryWatcher.L
      */
     private static final long WRITER_JOIN_MS = 500L;
 
+    /** Debug-only extras, see DebugBatteryReceiver. */
+    private static final String EXTRA_DEBUG_LEVEL = "debug_level";
+    private static final String EXTRA_DEBUG_PLUGGED = "debug_plugged";
+
     private volatile boolean running;
     private Thread acceptThread;
     private volatile BluetoothServerSocket serverSocket;
@@ -101,6 +105,17 @@ public final class LinkServerService extends Service implements BatteryWatcher.L
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && intent.hasExtra(EXTRA_DEBUG_LEVEL)) {
+            // Straight into the same path a real broadcast takes, so what is
+            // being exercised is the real writer, not a shortcut round it.
+            GlassState fake = BatteryReading.fromExtras(
+                    intent.getIntExtra(EXTRA_DEBUG_LEVEL, 100), 100,
+                    intent.getBooleanExtra(EXTRA_DEBUG_PLUGGED, true) ? 1 : 0);
+            if (fake != null) {
+                Log.i(TAG, "debug: battery " + fake);
+                onBatteryState(fake);
+            }
+        }
         if (!running) {
             running = true;
             acceptThread = new Thread(new Runnable() {

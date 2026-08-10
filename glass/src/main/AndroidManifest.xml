@@ -42,6 +42,14 @@
             </intent-filter>
         </receiver>
 
+        <receiver
+            android:name=".DebugBatteryReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="dev.erinlkolp.glassnotify.DEBUG_BATTERY" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>
