@@ -1112,36 +1112,18 @@ import android.os.Looper;
         //
         // Nothing here may write. See LinkReader's class comment - the
         // single-writer guarantee this whole class is built on depends on it.
-        Thread reader = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                new LinkReader(connected.getInputStream(), new LinkReader.Listener() {
-                    @Override
-                    public void onGlassState(final dev.erinlkolp.glassnotify.wire.GlassState state) {
-                        main.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                alerter.onGlassState(state);
-                            }
-                        });
-                    }
-                }).run();
-                Log.i(TAG, "reverse channel ended");
-            }
-        }, "glassnotify-reader");
-        reader.start();
-```
-
-`connected.getInputStream()` throws `IOException`, which cannot be declared on `Runnable.run()`. Hoist it above the thread instead, so the exception lands in `pump`'s existing `throws IOException` and is handled by the retry loop exactly like any other connection failure:
-
-```java
-        final java.io.InputStream reverse = connected.getInputStream();
+        //
+        // getInputStream() is called out here rather than inside run(): it
+        // throws IOException, which cannot be declared on Runnable.run(). Out
+        // here the exception lands in pump's existing throws clause and the
+        // retry loop treats it like any other connection failure.
+        final InputStream reverse = connected.getInputStream();
         Thread reader = new Thread(new Runnable() {
             @Override
             public void run() {
                 new LinkReader(reverse, new LinkReader.Listener() {
                     @Override
-                    public void onGlassState(final dev.erinlkolp.glassnotify.wire.GlassState state) {
+                    public void onGlassState(final GlassState state) {
                         main.post(new Runnable() {
                             @Override
                             public void run() {
@@ -1156,7 +1138,14 @@ import android.os.Looper;
         reader.start();
 ```
 
-Use the second form. Also change the signature of `pump` from `private void pump(BluetoothSocket connected)` to `private void pump(final BluetoothSocket connected)` — Java 8 would infer effectively-final, but the codebase targets source 8 with anonymous classes throughout and marking it `final` matches the surrounding style.
+This needs two more imports alongside those from step 4a:
+
+```java
+import java.io.InputStream;
+import dev.erinlkolp.glassnotify.wire.GlassState;
+```
+
+Also change the signature of `pump` from `private void pump(BluetoothSocket connected)` to `private void pump(final BluetoothSocket connected)`. Java 8 would infer effectively-final, but the codebase targets source 8 with anonymous inner classes throughout, and the explicit `final` matches the surrounding style.
 
 - [ ] **Step 5: Build and confirm the whole suite is still green**
 
