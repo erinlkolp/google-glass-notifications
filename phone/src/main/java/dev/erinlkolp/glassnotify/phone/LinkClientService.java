@@ -9,14 +9,18 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothSocket;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.Set;
 
 import dev.erinlkolp.glassnotify.wire.FrameCodec;
+import dev.erinlkolp.glassnotify.wire.GlassState;
 import dev.erinlkolp.glassnotify.wire.Hello;
 import dev.erinlkolp.glassnotify.wire.HelloCodec;
 import dev.erinlkolp.glassnotify.wire.MessageType;
@@ -123,6 +127,11 @@ public final class LinkClientService extends Service implements SnapshotBus.List
     /** Set when a newer snapshot is waiting to be sent. */
     private boolean snapshotPending; // guarded by wakeLock
 
+    /** Posts the charged alert. Touched only from the main thread. */
+    private ChargeAlerter alerter;
+
+    private final Handler main = new Handler(Looper.getMainLooper());
+
     public static void start(Context context) {
         context.startService(new Intent(context, LinkClientService.class));
     }
@@ -143,6 +152,7 @@ public final class LinkClientService extends Service implements SnapshotBus.List
     public void onCreate() {
         super.onCreate();
         createChannel();
+        alerter = new ChargeAlerter(this);
         startForeground(NOTIFICATION_ID, buildNotification(getString(R.string.status_connecting)));
         SnapshotBus.get().setListener(this);
     }
@@ -261,12 +271,46 @@ public final class LinkClientService extends Service implements SnapshotBus.List
      * is, and swallowing one would leave the phone reporting Connected to a
      * socket that has been dead for hours.
      */
-    private void pump(BluetoothSocket connected) throws IOException {
+    private void pump(final BluetoothSocket connected) throws IOException {
         BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
         writeFrame(connected, MessageType.HELLO,
                 HelloCodec.encode(new Hello(
                         adapter.getName() == null ? "phone" : adapter.getName(),
                         adapter.getAddress() == null ? "" : adapter.getAddress())));
+
+        // The reverse channel. A separate thread because this one must stay
+        // free to write, and a reader because Glass now reports its own
+        // battery state. It is deliberately fire-and-forget: no join, no
+        // reference kept, no effect on this method's control flow. When the
+        // session ends, connectLoop's finally closes the socket, the blocking
+        // read throws, and the thread ends itself.
+        //
+        // Nothing here may write. See LinkReader's class comment - the
+        // single-writer guarantee this whole class is built on depends on it.
+        //
+        // getInputStream() is called out here rather than inside run(): it
+        // throws IOException, which cannot be declared on Runnable.run(). Out
+        // here the exception lands in pump's existing throws clause and the
+        // retry loop treats it like any other connection failure.
+        final InputStream reverse = connected.getInputStream();
+        Thread reader = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                new LinkReader(reverse, new LinkReader.Listener() {
+                    @Override
+                    public void onGlassState(final GlassState state) {
+                        main.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                alerter.onGlassState(state);
+                            }
+                        });
+                    }
+                }).run();
+                Log.i(TAG, "reverse channel ended");
+            }
+        }, "glassnotify-reader");
+        reader.start();
 
         // Glass has whatever it cached from last time; replace it immediately.
         // Anything flagged while we were connecting is subsumed by this, since
