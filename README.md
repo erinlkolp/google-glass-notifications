@@ -25,7 +25,8 @@ Concretely:
 - **Will only appear if a SIM is later added to the V30:** SMS and phone calls. Today the V30 has
   no SIM, so neither exists to forward.
 - **Glass is read-only.** It displays and scrolls a queue. It never dismisses, replies to, or acts
-  on a notification — there is no reverse channel at all (see [section 5](#5-how-the-protocol-works)).
+  on a notification. The one thing it does send back is its own battery state, so the phone can tell
+  you when Glass has finished charging — see [section 5](#5-how-the-protocol-works).
 
 Full design rationale lives in the spec, `docs/superpowers/specs/2026-08-04-glass-notifications-design.md`,
 sections 1–2.
@@ -188,7 +189,7 @@ mean the test suite exercises different code than what actually runs on-device. 
 is bit-for-bit identical on host and Android, needs no dependency, and has no string-escaping edge
 cases to get wrong.
 
-### The three message types
+### The four message types
 
 - **`HELLO`** — sent once, phone → Glass, immediately after connecting. Carries the phone's
   Bluetooth device name and address. Fails fast on a version mismatch (see above).
@@ -201,9 +202,18 @@ cases to get wrong.
   phone detect a dead socket and start backing off promptly, and lets Glass mark its cached
   snapshot stale after `SnapshotStore.STALE_AFTER_MS` (30s) of silence rather than showing hours-old
   notifications as current.
+- **`GLASS_STATE`** — Glass → phone, unsolicited. Glass's own battery level and whether it is plugged
+  in. Sent when a connection opens and whenever the level or power state actually changes. This is the
+  only message that travels this direction, and the phone acts on exactly one thing in it: reaching
+  100% while on power, which raises a "Glass is charged" notification.
 
-There is deliberately **no reverse channel and no acknowledgement**. Glass never sends anything back
-to the phone.
+There is deliberately **no acknowledgement**. With full-state snapshots there is nothing to
+acknowledge: a lost frame is superseded by the next one.
+
+The reverse channel is exactly one message wide, and should stay that way. Glass volunteers its
+battery state and nothing else — it never asks the phone for anything, never confirms receipt, and
+never acts on a notification. Adding a second Glass → phone message is a real protocol change and
+should be argued on its own merits, not waved through because a channel already exists.
 
 ### Why whole snapshots, not deltas (`ADD`/`REMOVE`/`UPDATE`)
 
@@ -353,7 +363,8 @@ before a single frame is read.
 
 The reason this is so confusing in practice: **the new phone will say "Connected to Glass" anyway.**
 `LinkClientService` sets that status the moment TCP-level `connect()` succeeds, before any data is
-exchanged, and the protocol has no reverse channel (spec §7.4) — so the phone genuinely cannot learn
+exchanged, and the reverse channel carries no such signal (spec §7.4 — it is one message wide and
+carries battery state only) — so the phone genuinely cannot learn
 it was rejected. Only Glass knows:
 
 ```bash
@@ -612,6 +623,7 @@ once real bring-up happens.
 | `QueueActivity.REFRESH_INTERVAL_MS` | `5000` (5s) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/QueueActivity.java` | Fixed re-render poll interval while the queue screen is foregrounded, kept comfortably under the 30s staleness threshold so a stale marker cannot sit unseen for long. |
 | `Backoff.INITIAL_MS` | `1000` (1s) | `phone/src/main/java/dev/erinlkolp/glassnotify/phone/Backoff.java` | Fixed. First retry delay after a connection failure. |
 | `Backoff.MAX_MS` | `60000` (60s) | same | Fixed. Reconnect backoff ceiling; doubles from `INITIAL_MS` up to this cap. |
+| `ChargeAlertPolicy.FULL_LEVEL` | `100` (100%) | `phone/src/main/java/dev/erinlkolp/glassnotify/phone/ChargeAlertPolicy.java` | Fixed. Battery level, while on power, at which the phone raises the "Glass is charged" notification. |
 | `LinkServerService.RETRY_DELAY_MS` | `5000` (5s) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java` | Fixed. Delay before retrying `listenUsingRfcomm` after a failure (not the accept loop itself, which has no backoff — see known limitations). |
 | `SnapshotBus.DEBOUNCE_MS` | `500` (500ms) | `phone/src/main/java/dev/erinlkolp/glassnotify/phone/SnapshotBus.java` | Fixed. Coalescing window for bursty `onNotificationPosted` callbacks (e.g. a group message) before a snapshot is built and sent. |
 
