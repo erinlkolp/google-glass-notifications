@@ -17,6 +17,7 @@ import java.io.InputStream;
 
 import dev.erinlkolp.glassnotify.wire.Frame;
 import dev.erinlkolp.glassnotify.wire.FrameCodec;
+import dev.erinlkolp.glassnotify.wire.GlassState;
 import dev.erinlkolp.glassnotify.wire.Hello;
 import dev.erinlkolp.glassnotify.wire.HelloCodec;
 import dev.erinlkolp.glassnotify.wire.MessageType;
@@ -31,7 +32,7 @@ import dev.erinlkolp.glassnotify.wire.SnapshotCodec;
  * which belongs on the device with the larger battery. Blocking in accept()
  * costs nothing here. Spec section 5.
  */
-public final class LinkServerService extends Service {
+public final class LinkServerService extends Service implements BatteryWatcher.Listener {
 
     private static final String TAG = "GlassNotify";
 
@@ -44,6 +45,16 @@ public final class LinkServerService extends Service {
      * is purely to stop the loop spinning.
      */
     private static final long RETRY_DELAY_MS = 5_000L;
+
+    /**
+     * How long to wait for the state writer to notice the session ended.
+     *
+     * Tidiness, not correctness. A straggler holds a socket that acceptLoop's
+     * finally has already closed, so the worst it can do is throw on its next
+     * write and exit. The join just keeps threads from piling up across a run
+     * of fast reconnects.
+     */
+    private static final long WRITER_JOIN_MS = 500L;
 
     private volatile boolean running;
     private Thread acceptThread;
@@ -66,6 +77,15 @@ public final class LinkServerService extends Service {
     /** The last snapshot applied on this connection; null until one arrives. */
     private Snapshot lastApplied;
 
+    private BatteryWatcher batteryWatcher;
+
+    /**
+     * The writer for the session currently being served, or null between
+     * sessions. Volatile because onBatteryState runs on the main thread while
+     * the accept thread publishes and clears it.
+     */
+    private volatile StateWriter stateWriter;
+
     public static void start(Context context) {
         context.startService(new Intent(context, LinkServerService.class));
     }
@@ -75,6 +95,8 @@ public final class LinkServerService extends Service {
         super.onCreate();
         overlay = GlassNotify.overlay(this);
         GlassNotify.store(this);
+        batteryWatcher = new BatteryWatcher(this);
+        batteryWatcher.register(this);
     }
 
     @Override
@@ -96,6 +118,7 @@ public final class LinkServerService extends Service {
     @Override
     public void onDestroy() {
         running = false;
+        batteryWatcher.unregister(this);
         closeServerSocket();
         closeConnectedSocket();
         super.onDestroy();
@@ -110,6 +133,20 @@ public final class LinkServerService extends Service {
     @Override
     public IBinder onBind(Intent intent) {
         return null;
+    }
+
+    /**
+     * Called on the main thread by BatteryWatcher, already debounced.
+     *
+     * Hands off and returns. It never touches a socket, so a phone that has
+     * walked out of range cannot stall the main thread here.
+     */
+    @Override
+    public void onBatteryState(GlassState state) {
+        StateWriter writer = stateWriter;
+        if (writer != null) {
+            writer.offer(state);
+        }
     }
 
     private void acceptLoop() {
@@ -175,6 +212,18 @@ public final class LinkServerService extends Service {
         Log.i(TAG, "connected to " + address);
         lastApplied = null;
 
+        StateWriter writer;
+        Thread writerThread;
+        try {
+            writer = new StateWriter(socket.getOutputStream(), batteryWatcher.latest());
+        } catch (IOException e) {
+            Log.w(TAG, "no output stream for the reverse channel", e);
+            return;
+        }
+        writerThread = new Thread(writer, "glassnotify-state");
+        writerThread.start();
+        stateWriter = writer;
+
         try {
             InputStream in = socket.getInputStream();
             while (running) {
@@ -197,6 +246,18 @@ public final class LinkServerService extends Service {
             // Includes ProtocolException. Either way: close and go back to
             // accept(). Mid-stream resync is never attempted.
             Log.i(TAG, "connection ended: " + e.getMessage());
+        } finally {
+            // Clear the field first, so a battery change landing during
+            // teardown finds nothing rather than offering to a writer that is
+            // already stopping.
+            stateWriter = null;
+            writer.stop();
+            try {
+                writerThread.join(WRITER_JOIN_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            Log.i(TAG, "reverse channel ended");
         }
     }
 
