@@ -257,10 +257,16 @@ A heartbeat lets the phone detect a dead socket and begin backoff promptly, and 
 cached snapshot stale rather than presenting hours-old notifications as current. Starting values:
 `PING` every 10s, stale after ~30s of silence.
 
-### 7.4 No reverse channel
+### 7.4 The reverse channel is one message wide
 
-There is no `ACK` and no Glass → phone traffic. With full-state snapshots there is nothing to
-acknowledge: a lost frame is superseded by the next snapshot.
+There is no `ACK`. With full-state snapshots there is nothing to acknowledge: a lost frame is
+superseded by the next snapshot. There is no request/response either — neither side ever asks the
+other for anything.
+
+The single exception, added 2026-08-10, is `GLASS_STATE`: Glass volunteers its own battery level and
+power state so the phone can raise an alert when charging completes. It is unsolicited, carries no
+reply, and does not make Glass any less read-only with respect to notifications. See
+`2026-08-10-glass-charge-alert-design.md` §5.4.
 
 ---
 

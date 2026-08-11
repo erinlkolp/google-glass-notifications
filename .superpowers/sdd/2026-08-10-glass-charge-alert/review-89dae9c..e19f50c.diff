@@ -1,0 +1,278 @@
+# Review package: 89dae9c923d2e11ba01ddcc77a5363b61bf743cd..HEAD
+
+## Commits
+e19f50c feat(phone): alert when Glass finishes charging
+
+## Files changed
+ .../erinlkolp/glassnotify/phone/ChargeAlerter.java | 78 ++++++++++++++++++++++
+ .../glassnotify/phone/LinkClientService.java       | 46 ++++++++++++-
+ phone/src/main/res/drawable/ic_glass_charged.xml   |  9 +++
+ phone/src/main/res/values/strings.xml              |  3 +
+ 4 files changed, 135 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/ChargeAlerter.java b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/ChargeAlerter.java
+new file mode 100644
+index 0000000..b7c7746
+--- /dev/null
++++ b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/ChargeAlerter.java
+@@ -0,0 +1,78 @@
++package dev.erinlkolp.glassnotify.phone;
++
++import android.app.Notification;
++import android.app.NotificationChannel;
++import android.app.NotificationManager;
++import android.content.Context;
++
++import dev.erinlkolp.glassnotify.wire.GlassState;
++
++/**
++ * Raises and clears the "Glass is charged" notification.
++ *
++ * Its own channel, separate from the link status channel. That one is
++ * IMPORTANCE_MIN on purpose - it is an always-present service notification the
++ * wearer should never notice - and this one has to be audible, so they cannot
++ * share. IMPORTANCE_DEFAULT rather than HIGH: a finished charge is worth a
++ * sound, not a heads-up window over whatever you were doing.
++ *
++ * Main thread only. {@link ChargeAlertPolicy} holds mutable state with no
++ * synchronisation, and confining every call to one thread is cheaper than
++ * locking it.
++ */
++public final class ChargeAlerter implements LinkReader.Listener {
++
++    private static final String CHANNEL_ID = "glass_charge";
++
++    /** 1 belongs to the foreground service notification. */
++    private static final int NOTIFICATION_ID = 2;
++
++    private final Context context;
++    private final ChargeAlertPolicy policy = new ChargeAlertPolicy();
++
++    public ChargeAlerter(Context context) {
++        this.context = context.getApplicationContext();
++        createChannel();
++    }
++
++    @Override
++    public void onGlassState(GlassState state) {
++        switch (policy.onState(state)) {
++            case SHOW:
++                manager().notify(NOTIFICATION_ID, build());
++                break;
++            case CANCEL:
++                manager().cancel(NOTIFICATION_ID);
++                break;
++            default:
++                break;
++        }
++    }
++
++    private Notification build() {
++        return new Notification.Builder(context, CHANNEL_ID)
++                .setContentTitle(context.getString(R.string.charged_title))
++                .setContentText(context.getString(R.string.charged_text))
++                .setSmallIcon(R.drawable.ic_glass_charged)
++                .setAutoCancel(true)
++                // Belt and braces. The policy already guarantees we do not
++                // re-post while an alert stands, so this should never be the
++                // thing that keeps it quiet - but if that guarantee ever
++                // breaks, the failure is a silent update rather than a device
++                // that chirps on every reconnect.
++                .setOnlyAlertOnce(true)
++                .build();
++    }
++
++    private void createChannel() {
++        NotificationChannel channel = new NotificationChannel(CHANNEL_ID,
++                context.getString(R.string.channel_charge),
++                NotificationManager.IMPORTANCE_DEFAULT);
++        channel.setShowBadge(false);
++        manager().createNotificationChannel(channel);
++    }
++
++    private NotificationManager manager() {
++        return (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
++    }
++}
+diff --git a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java
+index 4181c5f..be60f6a 100644
+--- a/phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java
++++ b/phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java
+@@ -2,28 +2,32 @@ package dev.erinlkolp.glassnotify.phone;
+ 
+ import android.app.Notification;
+ import android.app.NotificationChannel;
+ import android.app.NotificationManager;
+ import android.app.Service;
+ import android.bluetooth.BluetoothAdapter;
+ import android.bluetooth.BluetoothDevice;
+ import android.bluetooth.BluetoothSocket;
+ import android.content.Context;
+ import android.content.Intent;
++import android.os.Handler;
+ import android.os.IBinder;
++import android.os.Looper;
+ import android.os.SystemClock;
+ import android.util.Log;
+ 
+ import java.io.IOException;
++import java.io.InputStream;
+ import java.util.Set;
+ 
+ import dev.erinlkolp.glassnotify.wire.FrameCodec;
++import dev.erinlkolp.glassnotify.wire.GlassState;
+ import dev.erinlkolp.glassnotify.wire.Hello;
+ import dev.erinlkolp.glassnotify.wire.HelloCodec;
+ import dev.erinlkolp.glassnotify.wire.MessageType;
+ import dev.erinlkolp.glassnotify.wire.Protocol;
+ import dev.erinlkolp.glassnotify.wire.Snapshot;
+ import dev.erinlkolp.glassnotify.wire.SnapshotCodec;
+ 
+ /**
+  * Owns the RFCOMM connection to Glass and the reconnect loop.
+  *
+@@ -116,40 +120,46 @@ public final class LinkClientService extends Service implements SnapshotBus.List
+ 
+     /** Guards {@link #wakeRequested} and {@link #snapshotPending}. */
+     private final Object wakeLock = new Object();
+ 
+     /** Set when something wants an immediate retry, e.g. ACL_CONNECTED. */
+     private boolean wakeRequested; // guarded by wakeLock
+ 
+     /** Set when a newer snapshot is waiting to be sent. */
+     private boolean snapshotPending; // guarded by wakeLock
+ 
++    /** Posts the charged alert. Touched only from the main thread. */
++    private ChargeAlerter alerter;
++
++    private final Handler main = new Handler(Looper.getMainLooper());
++
+     public static void start(Context context) {
+         context.startService(new Intent(context, LinkClientService.class));
+     }
+ 
+     /** Tears the link down. Used when the source of snapshots goes away. */
+     public static void stop(Context context) {
+         context.stopService(new Intent(context, LinkClientService.class));
+     }
+ 
+     /** Cuts the current backoff short. Called when Glass comes into range. */
+     public static void wake(Context context) {
+         Intent intent = new Intent(context, LinkClientService.class);
+         intent.putExtra("wake", true);
+         context.startService(intent);
+     }
+ 
+     @Override
+     public void onCreate() {
+         super.onCreate();
+         createChannel();
++        alerter = new ChargeAlerter(this);
+         startForeground(NOTIFICATION_ID, buildNotification(getString(R.string.status_connecting)));
+         SnapshotBus.get().setListener(this);
+     }
+ 
+     @Override
+     public int onStartCommand(Intent intent, int flags, int startId) {
+         if (intent != null && intent.getBooleanExtra("wake", false)) {
+             backoff.reset();
+             synchronized (wakeLock) {
+                 wakeRequested = true;
+@@ -254,27 +264,61 @@ public final class LinkClientService extends Service implements SnapshotBus.List
+     /**
+      * Sends the handshake, an immediate snapshot, then snapshots and
+      * heartbeats until the link dies.
+      *
+      * Runs on the worker thread and is the only place frames are written.
+      * Every IOException propagates out to the retry loop: there is no read
+      * side on this end, so a failed write is the only liveness signal there
+      * is, and swallowing one would leave the phone reporting Connected to a
+      * socket that has been dead for hours.
+      */
+-    private void pump(BluetoothSocket connected) throws IOException {
++    private void pump(final BluetoothSocket connected) throws IOException {
+         BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+         writeFrame(connected, MessageType.HELLO,
+                 HelloCodec.encode(new Hello(
+                         adapter.getName() == null ? "phone" : adapter.getName(),
+                         adapter.getAddress() == null ? "" : adapter.getAddress())));
+ 
++        // The reverse channel. A separate thread because this one must stay
++        // free to write, and a reader because Glass now reports its own
++        // battery state. It is deliberately fire-and-forget: no join, no
++        // reference kept, no effect on this method's control flow. When the
++        // session ends, connectLoop's finally closes the socket, the blocking
++        // read throws, and the thread ends itself.
++        //
++        // Nothing here may write. See LinkReader's class comment - the
++        // single-writer guarantee this whole class is built on depends on it.
++        //
++        // getInputStream() is called out here rather than inside run(): it
++        // throws IOException, which cannot be declared on Runnable.run(). Out
++        // here the exception lands in pump's existing throws clause and the
++        // retry loop treats it like any other connection failure.
++        final InputStream reverse = connected.getInputStream();
++        Thread reader = new Thread(new Runnable() {
++            @Override
++            public void run() {
++                new LinkReader(reverse, new LinkReader.Listener() {
++                    @Override
++                    public void onGlassState(final GlassState state) {
++                        main.post(new Runnable() {
++                            @Override
++                            public void run() {
++                                alerter.onGlassState(state);
++                            }
++                        });
++                    }
++                }).run();
++                Log.i(TAG, "reverse channel ended");
++            }
++        }, "glassnotify-reader");
++        reader.start();
++
+         // Glass has whatever it cached from last time; replace it immediately.
+         // Anything flagged while we were connecting is subsumed by this, since
+         // latest() is by definition at least as new.
+         clearPendingSnapshot();
+         writeSnapshot(connected, SnapshotBus.get().latest());
+ 
+         long nextPingAt = SystemClock.elapsedRealtime() + PING_INTERVAL_MS;
+         int successfulPings = 0;
+ 
+         while (running) {
+diff --git a/phone/src/main/res/drawable/ic_glass_charged.xml b/phone/src/main/res/drawable/ic_glass_charged.xml
+new file mode 100644
+index 0000000..81cc2cf
+--- /dev/null
++++ b/phone/src/main/res/drawable/ic_glass_charged.xml
+@@ -0,0 +1,9 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FFFFFFFF"
++        android:pathData="M10,2h4v2h-4z M7,5h10v16h-10z" />
++</vector>
+diff --git a/phone/src/main/res/values/strings.xml b/phone/src/main/res/values/strings.xml
+index 78539ad..05c2ecd 100644
+--- a/phone/src/main/res/values/strings.xml
++++ b/phone/src/main/res/values/strings.xml
+@@ -2,11 +2,14 @@
+ <resources>
+     <string name="app_name">Glass Notifications</string>
+     <string name="channel_link">Glass link</string>
+     <string name="status_connected">Connected to Glass</string>
+     <string name="status_connecting">Connecting to Glass…</string>
+     <string name="status_no_bluetooth">Bluetooth is off</string>
+     <string name="status_not_bonded">Glass is not paired</string>
+     <string name="grant_notification_access">Grant notification access</string>
+     <string name="grant_battery_exemption">Allow running in the background</string>
+     <string name="configure_allowlist">Choose which apps to show</string>
++    <string name="channel_charge">Glass charged</string>
++    <string name="charged_title">Glass is charged</string>
++    <string name="charged_text">100%% — ready to go</string>
+ </resources>

@@ -17,6 +17,7 @@ import java.io.InputStream;
 
 import dev.erinlkolp.glassnotify.wire.Frame;
 import dev.erinlkolp.glassnotify.wire.FrameCodec;
+import dev.erinlkolp.glassnotify.wire.GlassState;
 import dev.erinlkolp.glassnotify.wire.Hello;
 import dev.erinlkolp.glassnotify.wire.HelloCodec;
 import dev.erinlkolp.glassnotify.wire.MessageType;
@@ -31,7 +32,7 @@ import dev.erinlkolp.glassnotify.wire.SnapshotCodec;
  * which belongs on the device with the larger battery. Blocking in accept()
  * costs nothing here. Spec section 5.
  */
-public final class LinkServerService extends Service {
+public final class LinkServerService extends Service implements BatteryWatcher.Listener {
 
     private static final String TAG = "GlassNotify";
 
@@ -44,6 +45,20 @@ public final class LinkServerService extends Service {
      * is purely to stop the loop spinning.
      */
     private static final long RETRY_DELAY_MS = 5_000L;
+
+    /**
+     * How long to wait for the state writer to notice the session ended.
+     *
+     * Tidiness, not correctness. A straggler holds a socket that acceptLoop's
+     * finally has already closed, so the worst it can do is throw on its next
+     * write and exit. The join just keeps threads from piling up across a run
+     * of fast reconnects.
+     */
+    private static final long WRITER_JOIN_MS = 500L;
+
+    /** Debug-only extras, see DebugBatteryReceiver. */
+    private static final String EXTRA_DEBUG_LEVEL = "debug_level";
+    private static final String EXTRA_DEBUG_PLUGGED = "debug_plugged";
 
     private volatile boolean running;
     private Thread acceptThread;
@@ -66,6 +81,15 @@ public final class LinkServerService extends Service {
     /** The last snapshot applied on this connection; null until one arrives. */
     private Snapshot lastApplied;
 
+    private BatteryWatcher batteryWatcher;
+
+    /**
+     * The writer for the session currently being served, or null between
+     * sessions. Volatile because onBatteryState runs on the main thread while
+     * the accept thread publishes and clears it.
+     */
+    private volatile StateWriter stateWriter;
+
     public static void start(Context context) {
         context.startService(new Intent(context, LinkServerService.class));
     }
@@ -75,10 +99,23 @@ public final class LinkServerService extends Service {
         super.onCreate();
         overlay = GlassNotify.overlay(this);
         GlassNotify.store(this);
+        batteryWatcher = new BatteryWatcher(this);
+        batteryWatcher.register(this);
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && intent.hasExtra(EXTRA_DEBUG_LEVEL)) {
+            // Straight into the same path a real broadcast takes, so what is
+            // being exercised is the real writer, not a shortcut round it.
+            GlassState fake = BatteryReading.fromExtras(
+                    intent.getIntExtra(EXTRA_DEBUG_LEVEL, 100), 100,
+                    intent.getBooleanExtra(EXTRA_DEBUG_PLUGGED, true) ? 1 : 0);
+            if (fake != null) {
+                Log.i(TAG, "debug: battery " + fake);
+                onBatteryState(fake);
+            }
+        }
         if (!running) {
             running = true;
             acceptThread = new Thread(new Runnable() {
@@ -96,6 +133,7 @@ public final class LinkServerService extends Service {
     @Override
     public void onDestroy() {
         running = false;
+        batteryWatcher.unregister(this);
         closeServerSocket();
         closeConnectedSocket();
         super.onDestroy();
@@ -110,6 +148,20 @@ public final class LinkServerService extends Service {
     @Override
     public IBinder onBind(Intent intent) {
         return null;
+    }
+
+    /**
+     * Called on the main thread by BatteryWatcher, already debounced.
+     *
+     * Hands off and returns. It never touches a socket, so a phone that has
+     * walked out of range cannot stall the main thread here.
+     */
+    @Override
+    public void onBatteryState(GlassState state) {
+        StateWriter writer = stateWriter;
+        if (writer != null) {
+            writer.offer(state);
+        }
     }
 
     private void acceptLoop() {
@@ -175,6 +227,43 @@ public final class LinkServerService extends Service {
         Log.i(TAG, "connected to " + address);
         lastApplied = null;
 
+        StateWriter writer = null;
+        Thread writerThread = null;
+        try {
+            writer = new StateWriter(socket.getOutputStream(), batteryWatcher.latest());
+        } catch (IOException e) {
+            // No return here: the forward path (phone -> Glass) does not
+            // depend on this stream at all, and the phone has already shown
+            // "Connected" by the time this failure surfaces - it discovers
+            // nothing is wrong until its own next write. Aborting the whole
+            // session over a reverse channel the wearer never asked to see
+            // would drop an entire session of notifications and repeat on
+            // every reconnect if the condition persists, which is exactly
+            // the new failure mode spec section 3.2 rules out. So: log it
+            // and fall through into the read loop with no writer. writer and
+            // writerThread stay null, stateWriter is never published for
+            // this session, and onBatteryState already drops states when
+            // stateWriter is null - no extra handling needed below.
+            Log.w(TAG, "no output stream for the reverse channel, serving without it", e);
+        }
+        if (writer != null) {
+            writerThread = new Thread(writer, "glassnotify-state");
+            // Publish before start(), not after: onBatteryState (main
+            // thread) and this thread race to see stateWriter. If start()
+            // ran first, a battery tick landing in that window would find
+            // stateWriter still null and drop the update. BatteryWatcher
+            // only re-broadcasts on change (its debounce), so a dropped
+            // update is not merely late - once the reading has settled,
+            // nothing ever resends it, and the session goes without an
+            // alert until the link happens to drop and reconnect, possibly
+            // hours later. offer() is thread-safe and a not-yet-started
+            // thread simply reads the newer pending value on its first pass
+            // through the loop, so publishing first costs nothing and closes
+            // the window.
+            stateWriter = writer;
+            writerThread.start();
+        }
+
         try {
             InputStream in = socket.getInputStream();
             while (running) {
@@ -197,6 +286,23 @@ public final class LinkServerService extends Service {
             // Includes ProtocolException. Either way: close and go back to
             // accept(). Mid-stream resync is never attempted.
             Log.i(TAG, "connection ended: " + e.getMessage());
+        } finally {
+            // Clear the field first, so a battery change landing during
+            // teardown finds nothing rather than offering to a writer that is
+            // already stopping.
+            stateWriter = null;
+            // Both null together when the output stream failed above and the
+            // session ran with no reverse channel at all - nothing to stop
+            // or join in that case.
+            if (writer != null) {
+                writer.stop();
+                try {
+                    writerThread.join(WRITER_JOIN_MS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            Log.i(TAG, "reverse channel ended");
         }
     }
 

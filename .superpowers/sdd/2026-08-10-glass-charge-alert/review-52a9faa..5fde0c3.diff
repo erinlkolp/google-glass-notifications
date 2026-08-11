@@ -1,0 +1,174 @@
+# Review package: 52a9faa637d5773a6be155478a400a9c9b43c727..HEAD
+
+## Commits
+5fde0c3 feat(glass): inject fake battery state for testing
+
+## Files changed
+ glass/src/main/AndroidManifest.xml                 |  8 ++++++
+ .../glassnotify/glass/DebugBatteryReceiver.java    | 32 ++++++++++++++++++++++
+ .../glassnotify/glass/LinkServerService.java       | 15 ++++++++++
+ scripts/fake-battery.sh                            | 30 ++++++++++++++++++++
+ 4 files changed, 85 insertions(+)
+
+## Diff
+diff --git a/glass/src/main/AndroidManifest.xml b/glass/src/main/AndroidManifest.xml
+index 25db821..561f34d 100644
+--- a/glass/src/main/AndroidManifest.xml
++++ b/glass/src/main/AndroidManifest.xml
+@@ -35,13 +35,21 @@
+         </receiver>
+ 
+         <receiver
+             android:name=".DebugInjectReceiver"
+             android:exported="true">
+             <intent-filter>
+                 <action android:name="dev.erinlkolp.glassnotify.DEBUG_INJECT" />
+             </intent-filter>
+         </receiver>
+ 
++        <receiver
++            android:name=".DebugBatteryReceiver"
++            android:exported="true">
++            <intent-filter>
++                <action android:name="dev.erinlkolp.glassnotify.DEBUG_BATTERY" />
++            </intent-filter>
++        </receiver>
++
+     </application>
+ 
+ </manifest>
+diff --git a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/DebugBatteryReceiver.java b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/DebugBatteryReceiver.java
+new file mode 100644
+index 0000000..141ed3c
+--- /dev/null
++++ b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/DebugBatteryReceiver.java
+@@ -0,0 +1,32 @@
++package dev.erinlkolp.glassnotify.glass;
++
++import android.content.BroadcastReceiver;
++import android.content.Context;
++import android.content.Intent;
++
++/**
++ * Fake battery state, so the charge alert can be exercised without waiting
++ * over an hour for a real charge.
++ *
++ *   adb shell am broadcast -a dev.erinlkolp.glassnotify.DEBUG_BATTERY \
++ *     --ei level 100 --ez plugged true
++ *
++ * Routed through the service rather than acting directly, so the frame really
++ * does travel the live socket via StateWriter. A shortcut that posted the
++ * notification some other way would test nothing worth testing.
++ */
++public final class DebugBatteryReceiver extends BroadcastReceiver {
++
++    @Override
++    public void onReceive(Context context, Intent intent) {
++        if (!BuildConfig.DEBUG) {
++            // Never allow synthetic battery state into a non-debug build.
++            return;
++        }
++
++        Intent toService = new Intent(context, LinkServerService.class);
++        toService.putExtra("debug_level", intent.getIntExtra("level", 100));
++        toService.putExtra("debug_plugged", intent.getBooleanExtra("plugged", true));
++        context.startService(toService);
++    }
++}
+diff --git a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java
+index b374260..8ca375c 100644
+--- a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java
++++ b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java
+@@ -49,20 +49,24 @@ public final class LinkServerService extends Service implements BatteryWatcher.L
+     /**
+      * How long to wait for the state writer to notice the session ended.
+      *
+      * Tidiness, not correctness. A straggler holds a socket that acceptLoop's
+      * finally has already closed, so the worst it can do is throw on its next
+      * write and exit. The join just keeps threads from piling up across a run
+      * of fast reconnects.
+      */
+     private static final long WRITER_JOIN_MS = 500L;
+ 
++    /** Debug-only extras, see DebugBatteryReceiver. */
++    private static final String EXTRA_DEBUG_LEVEL = "debug_level";
++    private static final String EXTRA_DEBUG_PLUGGED = "debug_plugged";
++
+     private volatile boolean running;
+     private Thread acceptThread;
+     private volatile BluetoothServerSocket serverSocket;
+ 
+     /**
+      * The socket of the connection currently being served, for the whole time
+      * serve() is running; null otherwise. Closing it from onDestroy() is what
+      * unblocks a FrameCodec.read() the accept thread is blocked in - the
+      * listening serverSocket is already closed and gone by the time a
+      * connection is being served, so it cannot do that job. Volatile because
+@@ -94,20 +98,31 @@ public final class LinkServerService extends Service implements BatteryWatcher.L
+     public void onCreate() {
+         super.onCreate();
+         overlay = GlassNotify.overlay(this);
+         GlassNotify.store(this);
+         batteryWatcher = new BatteryWatcher(this);
+         batteryWatcher.register(this);
+     }
+ 
+     @Override
+     public int onStartCommand(Intent intent, int flags, int startId) {
++        if (intent != null && intent.hasExtra(EXTRA_DEBUG_LEVEL)) {
++            // Straight into the same path a real broadcast takes, so what is
++            // being exercised is the real writer, not a shortcut round it.
++            GlassState fake = BatteryReading.fromExtras(
++                    intent.getIntExtra(EXTRA_DEBUG_LEVEL, 100), 100,
++                    intent.getBooleanExtra(EXTRA_DEBUG_PLUGGED, true) ? 1 : 0);
++            if (fake != null) {
++                Log.i(TAG, "debug: battery " + fake);
++                onBatteryState(fake);
++            }
++        }
+         if (!running) {
+             running = true;
+             acceptThread = new Thread(new Runnable() {
+                 @Override
+                 public void run() {
+                     acceptLoop();
+                 }
+             }, "glassnotify-accept");
+             acceptThread.start();
+         }
+diff --git a/scripts/fake-battery.sh b/scripts/fake-battery.sh
+new file mode 100755
+index 0000000..f9cdf6b
+--- /dev/null
++++ b/scripts/fake-battery.sh
+@@ -0,0 +1,30 @@
++#!/usr/bin/env bash
++# Injects a synthetic battery state into the Glass app, so the phone's charge
++# alert can be exercised without waiting out a real charge.
++#
++#   scripts/fake-battery.sh 100 true    # full, on the charger  -> alert
++#   scripts/fake-battery.sh 100 false   # unplugged             -> alert clears
++#   scripts/fake-battery.sh 64 true     # charging              -> nothing
++set -euo pipefail
++
++SERIAL="${GLASS_SERIAL:-0123456789ABCDEF}"
++ACTION=dev.erinlkolp.glassnotify.DEBUG_BATTERY
++
++# `adb shell` joins its arguments with spaces and hands the result to the
++# DEVICE's shell, where our local quoting no longer exists. See the same note
++# in fake-notify.sh for what goes wrong without this.
++remote() {
++  local quoted=""
++  local arg
++  for arg in "$@"; do
++    quoted="$quoted '$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")'"
++  done
++  adb -s "$SERIAL" shell "$quoted"
++}
++
++LEVEL="${1:-100}"
++PLUGGED="${2:-true}"
++
++remote am broadcast -a "$ACTION" \
++  --ei level "$LEVEL" \
++  --ez plugged "$PLUGGED"
