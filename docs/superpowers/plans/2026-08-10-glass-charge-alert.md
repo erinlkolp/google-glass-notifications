@@ -961,10 +961,10 @@ In `phone/src/main/res/values/strings.xml`, add three entries inside `<resources
 ```xml
     <string name="channel_charge">Glass charged</string>
     <string name="charged_title">Glass is charged</string>
-    <string name="charged_text">100%% — ready to go</string>
+    <string name="charged_text" formatted="false">100% — ready to go</string>
 ```
 
-The doubled `%%` is required: a single `%` in an Android string resource is treated as a format specifier and fails the build with "Multiple substitutions specified in non-positional format".
+A lone `%` in an Android string resource is normally treated as a format specifier by aapt's validation, so `formatted="false"` is required to tell the compiler this string is not a format string and a bare `%` is allowed. Do **not** "fix" this by doubling it to `%%` instead: `ChargeAlerter.build()` retrieves this string with the single-argument `context.getString(int)`, which never runs `String.format` and therefore never collapses `%%` back down — it renders the literal two characters, producing `100%% — ready to go` on screen. Escape collapsing only happens through the varargs `getString(int, Object...)` overload. Because that overload is not used here, `formatted="false"` plus a single `%` is the only combination that both compiles and renders correctly.
 
 - [ ] **Step 2: Add the notification icon**
 

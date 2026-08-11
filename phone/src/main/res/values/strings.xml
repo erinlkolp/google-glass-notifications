@@ -11,5 +11,5 @@
     <string name="configure_allowlist">Choose which apps to show</string>
     <string name="channel_charge">Glass charged</string>
     <string name="charged_title">Glass is charged</string>
-    <string name="charged_text">100%% — ready to go</string>
+    <string name="charged_text" formatted="false">100% — ready to go</string>
 </resources>
