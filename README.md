@@ -484,7 +484,7 @@ only ever affects debug builds on a device Erin controls.
 ./gradlew :phone:testDebugUnitTest
 ```
 
-As of the last full run: **102 unit tests pass** (45 in `wire`, 32 in `glass`, 25 in `phone`), and
+As of the last full run: **147 unit tests pass** (58 in `wire`, 47 in `glass`, 42 in `phone`), and
 both APKs build cleanly except for one accepted, deliberately-unfixed deprecation note (see
 [Known limitations](#known-limitations-and-parked-items)).
 
@@ -599,11 +599,13 @@ on its own.
 
 ## 13. Tuned values
 
-**None of these have been tuned on real hardware yet — see [Known limitations](#known-limitations-and-parked-items).**
+**Most of these have not been tuned on real hardware yet — see [Known limitations](#known-limitations-and-parked-items).**
 Every value below is the value actually compiled into the last build, read directly from source
 rather than from any planning document, but the ones marked "starting value" were chosen by
 reasoning about the display and the radio, not by measurement on the device, and should be revisited
-once real bring-up happens.
+once real bring-up happens. `ChargeAlertPolicy.FULL_LEVEL` is the exception: it was exercised
+against both devices during hardware verification on 2026-08-10 (see the row below, and
+[Known limitations](#known-limitations-and-parked-items) for what that verification found).
 
 | Constant | Value | Where | Status |
 |---|---|---|---|
@@ -623,7 +625,7 @@ once real bring-up happens.
 | `QueueActivity.REFRESH_INTERVAL_MS` | `5000` (5s) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/QueueActivity.java` | Fixed re-render poll interval while the queue screen is foregrounded, kept comfortably under the 30s staleness threshold so a stale marker cannot sit unseen for long. |
 | `Backoff.INITIAL_MS` | `1000` (1s) | `phone/src/main/java/dev/erinlkolp/glassnotify/phone/Backoff.java` | Fixed. First retry delay after a connection failure. |
 | `Backoff.MAX_MS` | `60000` (60s) | same | Fixed. Reconnect backoff ceiling; doubles from `INITIAL_MS` up to this cap. |
-| `ChargeAlertPolicy.FULL_LEVEL` | `100` (100%) | `phone/src/main/java/dev/erinlkolp/glassnotify/phone/ChargeAlertPolicy.java` | Fixed. Battery level, while on power, at which the phone raises the "Glass is charged" notification. |
+| `ChargeAlertPolicy.FULL_LEVEL` | `100` (100%) | `phone/src/main/java/dev/erinlkolp/glassnotify/phone/ChargeAlertPolicy.java` | Fixed, and validated on hardware 2026-08-10. Battery level, while on power, at which the phone raises the "Glass is charged" notification. |
 | `LinkServerService.RETRY_DELAY_MS` | `5000` (5s) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java` | Fixed. Delay before retrying `listenUsingRfcomm` after a failure (not the accept loop itself, which has no backoff — see known limitations). |
 | `SnapshotBus.DEBOUNCE_MS` | `500` (500ms) | `phone/src/main/java/dev/erinlkolp/glassnotify/phone/SnapshotBus.java` | Fixed. Coalescing window for bursty `onNotificationPosted` callbacks (e.g. a group message) before a snapshot is built and sent. |
 
@@ -633,12 +635,17 @@ once real bring-up happens.
 
 Stated plainly so nothing above is mistaken for more settled than it is:
 
-- **Nothing has been tested on real hardware yet.** All 102 unit tests pass and both APKs build
-  cleanly. The RFCOMM concurrency (single-writer socket handling in `LinkClientService`, the
-  accept-loop lifecycle in `LinkServerService`, the connect/destroy race handling) has been verified
-  by code review and reconstructed happens-before reasoning, not by running the two devices against
-  each other. Section 8's first-run checklist and section 10's real-finger touch testing are both
-  still outstanding.
+- **Hardware verification was completed on 2026-08-10**, against both devices (Glass Explorer
+  Edition and the LG V30). All 147 unit tests pass and both APKs build cleanly. The RFCOMM
+  concurrency (single-writer socket handling in `LinkClientService`, the accept-loop lifecycle in
+  `LinkServerService`, the connect/destroy race handling, and the new `GLASS_STATE` reverse channel)
+  was exercised by running the two devices against each other, not only by code review.
+  - **On this ROM, Glass reports `status: 2` (`BATTERY_STATUS_CHARGING`) even at level 100 — it
+    never reports `status: 5` (`BATTERY_STATUS_FULL`).** Verified via `adb shell dumpsys battery`
+    during this pass. Had the charge-alert design triggered on `BATTERY_STATUS_FULL` instead of
+    battery level, the alert would never have fired at all on this hardware. This validates the
+    level-based trigger chosen in the charge-alert design, §4 (see also
+    [Tuned values](#13-tuned-values) → `ChargeAlertPolicy.FULL_LEVEL`).
 - **Touch behaviour has no automated coverage and cannot get any**, per the `adb shell input`
   limitation described in [Testing](#10-testing). This is not a gap to be closed later with more
   unit tests — it structurally cannot be closed that way.
@@ -649,7 +656,8 @@ Stated plainly so nothing above is mistaken for more settled than it is:
 - **Deliberately parked, not bugs:**
   - `DebugInjectReceiver` is `exported="true"` on an unprotected broadcast action in debug builds,
     so any other app on the same Glass unit could trigger fake interrupts. Debug-build-only, low
-    risk, not fixed.
+    risk, not fixed. `DebugBatteryReceiver` has the identical shape (`exported="true"`, guarded only
+    by `BuildConfig.DEBUG`) and the same acceptance applies.
   - `LinkServerService`'s `accept()` failure path has no backoff (only `listenUsingRfcomm` failures
     sleep, via `RETRY_DELAY_MS`), so a persistent hardware-level accept failure could hot-loop on
     Glass's small battery.

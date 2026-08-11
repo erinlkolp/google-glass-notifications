@@ -54,7 +54,12 @@ public final class ChargeAlerter implements LinkReader.Listener {
                 .setContentTitle(context.getString(R.string.charged_title))
                 .setContentText(context.getString(R.string.charged_text))
                 .setSmallIcon(R.drawable.ic_glass_charged)
-                .setAutoCancel(true)
+                // No setAutoCancel/setContentIntent: there is nothing for a
+                // tap to launch, and setAutoCancel(true) with no content
+                // intent never fires - it is inert without one, and adding
+                // an intent just to make it real is surface area this
+                // feature does not need. The notification goes away by
+                // being swiped, or by CANCEL when Glass is unplugged.
                 // Belt and braces. The policy already guarantees we do not
                 // re-post while an alert stands, so this should never be the
                 // thing that keeps it quiet - but if that guarantee ever

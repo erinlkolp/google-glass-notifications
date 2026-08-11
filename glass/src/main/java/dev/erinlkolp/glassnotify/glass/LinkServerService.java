@@ -227,17 +227,42 @@ public final class LinkServerService extends Service implements BatteryWatcher.L
         Log.i(TAG, "connected to " + address);
         lastApplied = null;
 
-        StateWriter writer;
-        Thread writerThread;
+        StateWriter writer = null;
+        Thread writerThread = null;
         try {
             writer = new StateWriter(socket.getOutputStream(), batteryWatcher.latest());
         } catch (IOException e) {
-            Log.w(TAG, "no output stream for the reverse channel", e);
-            return;
+            // No return here: the forward path (phone -> Glass) does not
+            // depend on this stream at all, and the phone has already shown
+            // "Connected" by the time this failure surfaces - it discovers
+            // nothing is wrong until its own next write. Aborting the whole
+            // session over a reverse channel the wearer never asked to see
+            // would drop an entire session of notifications and repeat on
+            // every reconnect if the condition persists, which is exactly
+            // the new failure mode spec section 3.2 rules out. So: log it
+            // and fall through into the read loop with no writer. writer and
+            // writerThread stay null, stateWriter is never published for
+            // this session, and onBatteryState already drops states when
+            // stateWriter is null - no extra handling needed below.
+            Log.w(TAG, "no output stream for the reverse channel, serving without it", e);
         }
-        writerThread = new Thread(writer, "glassnotify-state");
-        writerThread.start();
-        stateWriter = writer;
+        if (writer != null) {
+            writerThread = new Thread(writer, "glassnotify-state");
+            // Publish before start(), not after: onBatteryState (main
+            // thread) and this thread race to see stateWriter. If start()
+            // ran first, a battery tick landing in that window would find
+            // stateWriter still null and drop the update. BatteryWatcher
+            // only re-broadcasts on change (its debounce), so a dropped
+            // update is not merely late - once the reading has settled,
+            // nothing ever resends it, and the session goes without an
+            // alert until the link happens to drop and reconnect, possibly
+            // hours later. offer() is thread-safe and a not-yet-started
+            // thread simply reads the newer pending value on its first pass
+            // through the loop, so publishing first costs nothing and closes
+            // the window.
+            stateWriter = writer;
+            writerThread.start();
+        }
 
         try {
             InputStream in = socket.getInputStream();
@@ -266,11 +291,16 @@ public final class LinkServerService extends Service implements BatteryWatcher.L
             // teardown finds nothing rather than offering to a writer that is
             // already stopping.
             stateWriter = null;
-            writer.stop();
-            try {
-                writerThread.join(WRITER_JOIN_MS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+            // Both null together when the output stream failed above and the
+            // session ran with no reverse channel at all - nothing to stop
+            // or join in that case.
+            if (writer != null) {
+                writer.stop();
+                try {
+                    writerThread.join(WRITER_JOIN_MS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
             }
             Log.i(TAG, "reverse channel ended");
         }

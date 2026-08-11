@@ -251,7 +251,9 @@ The existing `glass_link` channel remains `IMPORTANCE_MIN` and is not modified; 
 foreground status notification behaves exactly as it does today. A new notification ID (`2`) is
 used, since `1` belongs to the foreground service.
 
-Content: title "Glass is charged", text "100% — ready to go". Not ongoing; auto-cancels on tap.
+Content: title "Glass is charged", text "100% — ready to go". Not ongoing, and no content intent —
+there is nothing for a tap to launch. It is dismissed by swiping, or cleared automatically
+(`NotificationManager.cancel`) when Glass reports it has come off power.
 
 **Open implementation detail:** the small icon. Existing code uses
 `android.R.drawable.stat_sys_data_bluetooth`. A battery glyph is preferable, but platform drawable
