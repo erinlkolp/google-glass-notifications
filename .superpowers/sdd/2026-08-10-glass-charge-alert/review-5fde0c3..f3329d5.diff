@@ -1,0 +1,172 @@
+# Review package: 5fde0c3eaaf08f2d843c84fa4b91556ed0ae7f6a..HEAD
+
+## Commits
+f3329d5 docs: record the reverse channel
+
+## Files changed
+ README.md                                          | 22 +++++++++++++++++-----
+ .../specs/2026-08-04-glass-notifications-design.md | 12 +++++++++---
+ 2 files changed, 26 insertions(+), 8 deletions(-)
+
+## Diff
+diff --git a/README.md b/README.md
+index 01c7f98..4c05cc7 100644
+--- a/README.md
++++ b/README.md
+@@ -18,21 +18,22 @@ accounts as everything else: Signal, Discord, Slack, Gmail, and similar. Its not
+ filtered and tiered on the phone, then pushed to Glass, which displays them and nothing else.
+ 
+ Concretely:
+ 
+ - **Will appear on Glass:** anything the V30 receives a system notification for and that is
+   allowlisted — Signal messages, Discord pings, Slack DMs, calendar reminders, and so on.
+ - **Will never appear:** iMessage. iOS does not let any accessory read it, on any hardware.
+ - **Will only appear if a SIM is later added to the V30:** SMS and phone calls. Today the V30 has
+   no SIM, so neither exists to forward.
+ - **Glass is read-only.** It displays and scrolls a queue. It never dismisses, replies to, or acts
+-  on a notification — there is no reverse channel at all (see [section 5](#5-how-the-protocol-works)).
++  on a notification. The one thing it does send back is its own battery state, so the phone can tell
++  you when Glass has finished charging — see [section 5](#5-how-the-protocol-works).
+ 
+ Full design rationale lives in the spec, `docs/superpowers/specs/2026-08-04-glass-notifications-design.md`,
+ sections 1–2.
+ 
+ ---
+ 
+ ## 2. Why not the iPhone
+ 
+ This project's original goal was mirroring notifications from Erin's actual phone, an iPhone. That
+ turned out not to be buildable on this Glass hardware, and the reason is worth keeping on record so
+@@ -181,36 +182,45 @@ declaring a length over 64KB (`Protocol.MAX_FRAME_BYTES`) is rejected **before a
+ allocated**, so a corrupted length field cannot be turned into an `OutOfMemoryError`. A version the
+ receiver does not recognise is not rejected outright — it is surfaced up so Glass can show an
+ explicit "phone app out of date" state instead of a generic stream error.
+ 
+ Encoding uses plain `java.io.DataOutputStream`/`DataInputStream`, not JSON. Android ships its own
+ reimplementation of `org.json` that differs from the one available to a host JVM test, which would
+ mean the test suite exercises different code than what actually runs on-device. `DataOutputStream`
+ is bit-for-bit identical on host and Android, needs no dependency, and has no string-escaping edge
+ cases to get wrong.
+ 
+-### The three message types
++### The four message types
+ 
+ - **`HELLO`** — sent once, phone → Glass, immediately after connecting. Carries the phone's
+   Bluetooth device name and address. Fails fast on a version mismatch (see above).
+ - **`SNAPSHOT`** — the entire current notification queue: a monotonically increasing snapshot id,
+   then up to 20 items (`Protocol.MAX_ITEMS`), each with `key`, `appLabel`, `title`, `text`,
+   `postedAt` (epoch millis), and `tier` (`INTERRUPT` or `QUEUE`). Ordered newest-first by the phone;
+   Glass renders the list as given and has no opinion about ordering.
+ - **`PING`** — sent every 10 seconds by the phone (`LinkClientService.PING_INTERVAL_MS`), empty
+   body. RFCOMM sockets can half-die with neither end noticing — the heartbeat is what lets the
+   phone detect a dead socket and start backing off promptly, and lets Glass mark its cached
+   snapshot stale after `SnapshotStore.STALE_AFTER_MS` (30s) of silence rather than showing hours-old
+   notifications as current.
++- **`GLASS_STATE`** — Glass → phone, unsolicited. Glass's own battery level and whether it is plugged
++  in. Sent when a connection opens and whenever the level or power state actually changes. This is the
++  only message that travels this direction, and the phone acts on exactly one thing in it: reaching
++  100% while on power, which raises a "Glass is charged" notification.
+ 
+-There is deliberately **no reverse channel and no acknowledgement**. Glass never sends anything back
+-to the phone.
++There is deliberately **no acknowledgement**. With full-state snapshots there is nothing to
++acknowledge: a lost frame is superseded by the next one.
++
++The reverse channel is exactly one message wide, and should stay that way. Glass volunteers its
++battery state and nothing else — it never asks the phone for anything, never confirms receipt, and
++never acts on a notification. Adding a second Glass → phone message is a real protocol change and
++should be argued on its own merits, not waved through because a channel already exists.
+ 
+ ### Why whole snapshots, not deltas (`ADD`/`REMOVE`/`UPDATE`)
+ 
+ Every time notification state changes on the phone, it sends the **entire current queue**, and
+ Glass simply replaces whatever it was holding. This is more bytes per update than a delta scheme
+ would need, but the queue is capped at 20 items and a full snapshot comes to roughly 3KB (worst
+ case, measured under test, is under 16KB — see `SnapshotCodecTest.aFullSnapshotFitsComfortablyInOneFrame`)
+ — trivial over RFCOMM. In exchange, the message becomes **idempotent**: a duplicate frame, a replayed
+ frame, or a frame that arrives on reconnect are all harmless, because each one simply overwrites
+ state rather than needing to be reconciled against what came before. Deltas would need sequence
+@@ -346,21 +356,22 @@ gotchas, and **both fail silently** — nothing errors, the setup screen looks f
+ notification ever arrives.
+ 
+ **Gotcha 1: Glass is pinned to the old phone's MAC.**
+ 
+ `PeerPin` is trust-on-first-use (§12, spec §11.1): the first device to connect is remembered, and
+ every later connection is checked against it and refused on mismatch. A new phone gets rejected
+ before a single frame is read.
+ 
+ The reason this is so confusing in practice: **the new phone will say "Connected to Glass" anyway.**
+ `LinkClientService` sets that status the moment TCP-level `connect()` succeeds, before any data is
+-exchanged, and the protocol has no reverse channel (spec §7.4) — so the phone genuinely cannot learn
++exchanged, and the reverse channel carries no such signal (spec §7.4 — it is one message wide and
++carries battery state only) — so the phone genuinely cannot learn
+ it was rejected. Only Glass knows:
+ 
+ ```bash
+ adb -s 0123456789ABCDEF logcat -s GlassNotify   # look for "refusing connection from unpinned device"
+ ```
+ 
+ Clear the pin, then **launch the Glass app once** — `pm clear` also returns the package to Android's
+ stopped state, and stopped packages receive no broadcasts, so the boot receiver stays dormant until
+ something launches it:
+ 
+@@ -605,20 +616,21 @@ once real bring-up happens.
+ | `Protocol.MAX_APP_LABEL_CHARS` | `24` | same | Fixed protocol constant. |
+ | `InterruptOverlay.DISPLAY_MS` | `5000` (5s) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/InterruptOverlay.java` | **Starting value, tune on hardware.** How long an interrupt card stays up before auto-dismissing. |
+ | `LinkClientService.PING_INTERVAL_MS` | `10000` (10s) | `phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java` | **Starting value, tune on hardware.** How often the phone sends a heartbeat. |
+ | `SnapshotStore.STALE_AFTER_MS` | `30000` (30s) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/SnapshotStore.java` | **Starting value, tune on hardware.** Silence beyond this marks Glass's cached queue stale. Chosen as 3× the ping interval. |
+ | `SwipeDetector.SWIPE_MIN_DX` | `60f` dp | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/SwipeDetector.java` | **Starting value, tune on hardware.** Minimum horizontal travel to register as a swipe rather than a tap. Explicitly called out in the plan as "chosen on reasoning, not measurement." |
+ | `SwipeDetector.HORIZONTAL_DOMINANCE` | `1.2f` | same | **Starting value, tune on hardware.** How much larger `|dx|` must be than `|dy|` for a gesture to count as horizontal. |
+ | `SwipeDetector.TAP_MAX_MS` | `400` ms | same | **Starting value, tune on hardware.** Maximum duration for a gesture with small travel to count as a tap. |
+ | `QueueActivity.REFRESH_INTERVAL_MS` | `5000` (5s) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/QueueActivity.java` | Fixed re-render poll interval while the queue screen is foregrounded, kept comfortably under the 30s staleness threshold so a stale marker cannot sit unseen for long. |
+ | `Backoff.INITIAL_MS` | `1000` (1s) | `phone/src/main/java/dev/erinlkolp/glassnotify/phone/Backoff.java` | Fixed. First retry delay after a connection failure. |
+ | `Backoff.MAX_MS` | `60000` (60s) | same | Fixed. Reconnect backoff ceiling; doubles from `INITIAL_MS` up to this cap. |
++| `ChargeAlertPolicy.FULL_LEVEL` | `100` (100%) | `phone/src/main/java/dev/erinlkolp/glassnotify/phone/ChargeAlertPolicy.java` | Fixed. Battery level, while on power, at which the phone raises the "Glass is charged" notification. |
+ | `LinkServerService.RETRY_DELAY_MS` | `5000` (5s) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java` | Fixed. Delay before retrying `listenUsingRfcomm` after a failure (not the accept loop itself, which has no backoff — see known limitations). |
+ | `SnapshotBus.DEBOUNCE_MS` | `500` (500ms) | `phone/src/main/java/dev/erinlkolp/glassnotify/phone/SnapshotBus.java` | Fixed. Coalescing window for bursty `onNotificationPosted` callbacks (e.g. a group message) before a snapshot is built and sent. |
+ 
+ ---
+ 
+ ## Known limitations and parked items
+ 
+ Stated plainly so nothing above is mistaken for more settled than it is:
+ 
+ - **Nothing has been tested on real hardware yet.** All 102 unit tests pass and both APKs build
+diff --git a/docs/superpowers/specs/2026-08-04-glass-notifications-design.md b/docs/superpowers/specs/2026-08-04-glass-notifications-design.md
+index 798ccec..82c289b 100644
+--- a/docs/superpowers/specs/2026-08-04-glass-notifications-design.md
++++ b/docs/superpowers/specs/2026-08-04-glass-notifications-design.md
+@@ -250,24 +250,30 @@ the list as given and holds no opinion about ordering.
+ 
+ Truncation happens **on the phone, before transmission**. At 320×180dp only a couple hundred
+ characters are renderable, so sending more wastes radio time and lets a pathological notification
+ exhaust Glass's memory. It also keeps every string well under `writeUTF`'s 64KB ceiling.
+ 
+ **`PING`** — periodic, phone → Glass. RFCOMM sockets can half-die silently with neither end noticing.
+ A heartbeat lets the phone detect a dead socket and begin backoff promptly, and lets Glass mark its
+ cached snapshot stale rather than presenting hours-old notifications as current. Starting values:
+ `PING` every 10s, stale after ~30s of silence.
+ 
+-### 7.4 No reverse channel
++### 7.4 The reverse channel is one message wide
+ 
+-There is no `ACK` and no Glass → phone traffic. With full-state snapshots there is nothing to
+-acknowledge: a lost frame is superseded by the next snapshot.
++There is no `ACK`. With full-state snapshots there is nothing to acknowledge: a lost frame is
++superseded by the next snapshot. There is no request/response either — neither side ever asks the
++other for anything.
++
++The single exception, added 2026-08-10, is `GLASS_STATE`: Glass volunteers its own battery level and
++power state so the phone can raise an alert when charging completes. It is unsolicited, carries no
++reply, and does not make Glass any less read-only with respect to notifications. See
++`2026-08-10-glass-charge-alert-design.md` §5.4.
+ 
+ ---
+ 
+ ## 8. Tiering and filtering
+ 
+ **All filtering and tier assignment happens on the phone.** The V30 has a real screen to configure an
+ allowlist on; Glass does not. The phone evaluates each notification, tags it `INTERRUPT` or `QUEUE`,
+ and Glass obeys.
+ 
+ This also means filtered-out notifications never reach the radio, which is the single largest lever

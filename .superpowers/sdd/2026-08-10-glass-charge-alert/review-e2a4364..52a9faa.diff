@@ -1,0 +1,507 @@
+# Review package: e2a43646243115b7324d46bfa5c3ba680bc48ca1..HEAD
+
+## Commits
+52a9faa feat(glass): report battery state to the phone
+
+## Files changed
+ .../glassnotify/glass/LinkServerService.java       |  63 ++++++++-
+ .../erinlkolp/glassnotify/glass/StateWriter.java   | 105 ++++++++++++++
+ .../glassnotify/glass/StateWriterTest.java         | 154 +++++++++++++++++++++
+ 3 files changed, 321 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java
+index 4b9ed5a..b374260 100644
+--- a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java
++++ b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/LinkServerService.java
+@@ -10,48 +10,59 @@ import android.content.Intent;
+ import android.os.Handler;
+ import android.os.IBinder;
+ import android.os.Looper;
+ import android.util.Log;
+ 
+ import java.io.IOException;
+ import java.io.InputStream;
+ 
+ import dev.erinlkolp.glassnotify.wire.Frame;
+ import dev.erinlkolp.glassnotify.wire.FrameCodec;
++import dev.erinlkolp.glassnotify.wire.GlassState;
+ import dev.erinlkolp.glassnotify.wire.Hello;
+ import dev.erinlkolp.glassnotify.wire.HelloCodec;
+ import dev.erinlkolp.glassnotify.wire.MessageType;
+ import dev.erinlkolp.glassnotify.wire.Protocol;
+ import dev.erinlkolp.glassnotify.wire.Snapshot;
+ import dev.erinlkolp.glassnotify.wire.SnapshotCodec;
+ 
+ /**
+  * Accepts the phone's RFCOMM connection and applies whatever it sends.
+  *
+  * Glass is the server because reconnection means an indefinite backoff loop,
+  * which belongs on the device with the larger battery. Blocking in accept()
+  * costs nothing here. Spec section 5.
+  */
+-public final class LinkServerService extends Service {
++public final class LinkServerService extends Service implements BatteryWatcher.Listener {
+ 
+     private static final String TAG = "GlassNotify";
+ 
+     /**
+      * How long to idle before re-arming the listener after a failure.
+      *
+      * A plain sleep rather than the phone's exponential Backoff: Glass is the
+      * passive side, so there is no cost to re-arming promptly, and a growing
+      * delay here would only make the phone's own retry look broken. The point
+      * is purely to stop the loop spinning.
+      */
+     private static final long RETRY_DELAY_MS = 5_000L;
+ 
++    /**
++     * How long to wait for the state writer to notice the session ended.
++     *
++     * Tidiness, not correctness. A straggler holds a socket that acceptLoop's
++     * finally has already closed, so the worst it can do is throw on its next
++     * write and exit. The join just keeps threads from piling up across a run
++     * of fast reconnects.
++     */
++    private static final long WRITER_JOIN_MS = 500L;
++
+     private volatile boolean running;
+     private Thread acceptThread;
+     private volatile BluetoothServerSocket serverSocket;
+ 
+     /**
+      * The socket of the connection currently being served, for the whole time
+      * serve() is running; null otherwise. Closing it from onDestroy() is what
+      * unblocks a FrameCodec.read() the accept thread is blocked in - the
+      * listening serverSocket is already closed and gone by the time a
+      * connection is being served, so it cannot do that job. Volatile because
+@@ -59,29 +70,40 @@ public final class LinkServerService extends Service {
+      * no other happens-before edge between them.
+      */
+     private volatile BluetoothSocket connectedSocket;
+ 
+     private final Handler main = new Handler(Looper.getMainLooper());
+     private InterruptOverlay overlay;
+ 
+     /** The last snapshot applied on this connection; null until one arrives. */
+     private Snapshot lastApplied;
+ 
++    private BatteryWatcher batteryWatcher;
++
++    /**
++     * The writer for the session currently being served, or null between
++     * sessions. Volatile because onBatteryState runs on the main thread while
++     * the accept thread publishes and clears it.
++     */
++    private volatile StateWriter stateWriter;
++
+     public static void start(Context context) {
+         context.startService(new Intent(context, LinkServerService.class));
+     }
+ 
+     @Override
+     public void onCreate() {
+         super.onCreate();
+         overlay = GlassNotify.overlay(this);
+         GlassNotify.store(this);
++        batteryWatcher = new BatteryWatcher(this);
++        batteryWatcher.register(this);
+     }
+ 
+     @Override
+     public int onStartCommand(Intent intent, int flags, int startId) {
+         if (!running) {
+             running = true;
+             acceptThread = new Thread(new Runnable() {
+                 @Override
+                 public void run() {
+                     acceptLoop();
+@@ -89,36 +111,51 @@ public final class LinkServerService extends Service {
+             }, "glassnotify-accept");
+             acceptThread.start();
+         }
+         // Restart if the system kills us: this service is the whole point of the app.
+         return START_STICKY;
+     }
+ 
+     @Override
+     public void onDestroy() {
+         running = false;
++        batteryWatcher.unregister(this);
+         closeServerSocket();
+         closeConnectedSocket();
+         super.onDestroy();
+         main.post(new Runnable() {
+             @Override
+             public void run() {
+                 overlay.dismiss();
+             }
+         });
+     }
+ 
+     @Override
+     public IBinder onBind(Intent intent) {
+         return null;
+     }
+ 
++    /**
++     * Called on the main thread by BatteryWatcher, already debounced.
++     *
++     * Hands off and returns. It never touches a socket, so a phone that has
++     * walked out of range cannot stall the main thread here.
++     */
++    @Override
++    public void onBatteryState(GlassState state) {
++        StateWriter writer = stateWriter;
++        if (writer != null) {
++            writer.offer(state);
++        }
++    }
++
+     private void acceptLoop() {
+         while (running) {
+             BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+             if (adapter == null || !adapter.isEnabled()) {
+                 // Bluetooth is off. Idle rather than spinning a retry loop.
+                 sleepQuietly(RETRY_DELAY_MS);
+                 continue;
+             }
+ 
+             try {
+@@ -168,20 +205,32 @@ public final class LinkServerService extends Service {
+         PeerPin pin = GlassNotify.peerPin(this);
+         if (!pin.isAllowed(address)) {
+             Log.w(TAG, "refusing connection from unpinned device " + address);
+             return;
+         }
+         pin.pinIfUnset(address);
+ 
+         Log.i(TAG, "connected to " + address);
+         lastApplied = null;
+ 
++        StateWriter writer;
++        Thread writerThread;
++        try {
++            writer = new StateWriter(socket.getOutputStream(), batteryWatcher.latest());
++        } catch (IOException e) {
++            Log.w(TAG, "no output stream for the reverse channel", e);
++            return;
++        }
++        writerThread = new Thread(writer, "glassnotify-state");
++        writerThread.start();
++        stateWriter = writer;
++
+         try {
+             InputStream in = socket.getInputStream();
+             while (running) {
+                 Frame frame = FrameCodec.read(in);
+ 
+                 if (frame.version != Protocol.VERSION) {
+                     Log.w(TAG, "protocol version " + frame.version
+                             + " from phone, expected " + Protocol.VERSION);
+                     // A state, not a message. A ~3.5s Toast on a see-through
+                     // prism is one the wearer is very likely looking away
+@@ -190,20 +239,32 @@ public final class LinkServerService extends Service {
+                     GlassNotify.store(this).setVersionMismatch(true);
+                     return;
+                 }
+ 
+                 dispatch(frame);
+             }
+         } catch (IOException e) {
+             // Includes ProtocolException. Either way: close and go back to
+             // accept(). Mid-stream resync is never attempted.
+             Log.i(TAG, "connection ended: " + e.getMessage());
++        } finally {
++            // Clear the field first, so a battery change landing during
++            // teardown finds nothing rather than offering to a writer that is
++            // already stopping.
++            stateWriter = null;
++            writer.stop();
++            try {
++                writerThread.join(WRITER_JOIN_MS);
++            } catch (InterruptedException e) {
++                Thread.currentThread().interrupt();
++            }
++            Log.i(TAG, "reverse channel ended");
+         }
+     }
+ 
+     private void dispatch(Frame frame) throws IOException {
+         switch (frame.type) {
+             case MessageType.HELLO: {
+                 Hello hello = HelloCodec.decode(frame.body);
+                 Log.i(TAG, "hello from " + hello.deviceName + " " + hello.deviceAddress);
+                 // A HELLO that got this far carried a version we understand,
+                 // which is the successful handshake that clears a mismatch
+diff --git a/glass/src/main/java/dev/erinlkolp/glassnotify/glass/StateWriter.java b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/StateWriter.java
+new file mode 100644
+index 0000000..249fb9e
+--- /dev/null
++++ b/glass/src/main/java/dev/erinlkolp/glassnotify/glass/StateWriter.java
+@@ -0,0 +1,105 @@
++package dev.erinlkolp.glassnotify.glass;
++
++import java.io.IOException;
++import java.io.OutputStream;
++
++import dev.erinlkolp.glassnotify.wire.FrameCodec;
++import dev.erinlkolp.glassnotify.wire.GlassState;
++import dev.erinlkolp.glassnotify.wire.GlassStateCodec;
++import dev.erinlkolp.glassnotify.wire.MessageType;
++
++/**
++ * Writes Glass's battery state to the phone, on its own thread.
++ *
++ * <h3>Why a separate thread</h3>
++ *
++ * The accept thread spends its life blocked in FrameCodec.read, so it cannot
++ * also write. More importantly it must not: if the phone on the other end is
++ * an older build with no reader, its receive buffer eventually fills and a
++ * write here blocks forever. On this thread that is harmless - snapshots keep
++ * arriving and rendering exactly as before. On the accept thread it would stop
++ * the prism.
++ *
++ * <h3>Single writer</h3>
++ *
++ * This is the only code on Glass that writes to the socket, mirroring the
++ * discipline LinkClientService documents on the phone. The accept thread reads
++ * and never writes; this thread writes and never reads.
++ *
++ * <h3>Coalescing</h3>
++ *
++ * {@link #offer} overwrites rather than queues, so several changes arriving
++ * before the writer wakes collapse into the newest. State is idempotent - only
++ * the current value ever mattered - so there is nothing to lose and no queue to
++ * bound.
++ *
++ * No android.util.Log, so this is testable on the JVM. LinkServerService logs
++ * when the thread ends.
++ */
++public final class StateWriter implements Runnable {
++
++    private final OutputStream out;
++
++    private final Object lock = new Object();
++
++    /** The state waiting to be written, or null if there is none. */
++    private GlassState pending; // guarded by lock
++
++    private boolean stopped; // guarded by lock
++
++    /**
++     * @param initial the state to send as soon as the thread starts, or null if
++     *                none is known yet. Sending on connect rather than only on
++     *                change is what lets the phone notice a charge that
++     *                finished while the link was down.
++     */
++    public StateWriter(OutputStream out, GlassState initial) {
++        if (out == null) {
++            throw new NullPointerException("out");
++        }
++        this.out = out;
++        this.pending = initial;
++    }
++
++    /** Never blocks. Safe from any thread, including the main thread. */
++    public void offer(GlassState state) {
++        synchronized (lock) {
++            pending = state;
++            lock.notifyAll();
++        }
++    }
++
++    /** Makes {@link #run} return. Idempotent. */
++    public void stop() {
++        synchronized (lock) {
++            stopped = true;
++            lock.notifyAll();
++        }
++    }
++
++    @Override
++    public void run() {
++        try {
++            while (true) {
++                GlassState next;
++                synchronized (lock) {
++                    while (!stopped && pending == null) {
++                        lock.wait();
++                    }
++                    if (stopped) {
++                        return;
++                    }
++                    next = pending;
++                    pending = null;
++                }
++                // Outside the lock: a blocked write must not also block offer().
++                FrameCodec.write(out, MessageType.GLASS_STATE, GlassStateCodec.encode(next));
++            }
++        } catch (IOException e) {
++            // The session is over. The accept thread finds out independently,
++            // by its own read failing.
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++        }
++    }
++}
+diff --git a/glass/src/test/java/dev/erinlkolp/glassnotify/glass/StateWriterTest.java b/glass/src/test/java/dev/erinlkolp/glassnotify/glass/StateWriterTest.java
+new file mode 100644
+index 0000000..b6d221e
+--- /dev/null
++++ b/glass/src/test/java/dev/erinlkolp/glassnotify/glass/StateWriterTest.java
+@@ -0,0 +1,154 @@
++package dev.erinlkolp.glassnotify.glass;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.fail;
++
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
++
++import org.junit.Test;
++
++import dev.erinlkolp.glassnotify.wire.Frame;
++import dev.erinlkolp.glassnotify.wire.FrameCodec;
++import dev.erinlkolp.glassnotify.wire.GlassState;
++import dev.erinlkolp.glassnotify.wire.GlassStateCodec;
++import dev.erinlkolp.glassnotify.wire.MessageType;
++
++public class StateWriterTest {
++
++    /** One GLASS_STATE frame is 4 length bytes + version + type + 2 body. */
++    private static final int FRAME_BYTES = 8;
++
++    private final ByteArrayOutputStream sink = new ByteArrayOutputStream();
++
++    /**
++     * Waits for the writer to produce at least the given number of bytes.
++     * ByteArrayOutputStream's methods are synchronized, so polling size() from
++     * this thread is safe. A deadline rather than a fixed sleep keeps the test
++     * fast when it passes and honest when it hangs.
++     */
++    private void awaitBytes(int count) throws Exception {
++        long deadline = System.currentTimeMillis() + 2000L;
++        while (sink.size() < count) {
++            if (System.currentTimeMillis() > deadline) {
++                fail("expected " + count + " bytes, only saw " + sink.size());
++            }
++            Thread.sleep(5L);
++        }
++    }
++
++    private java.util.List<GlassState> decodeAll() throws Exception {
++        java.util.List<GlassState> states = new java.util.ArrayList<GlassState>();
++        ByteArrayInputStream in = new ByteArrayInputStream(sink.toByteArray());
++        while (in.available() > 0) {
++            Frame frame = FrameCodec.read(in);
++            assertEquals(MessageType.GLASS_STATE, frame.type);
++            states.add(GlassStateCodec.decode(frame.body));
++        }
++        return states;
++    }
++
++    @Test
++    public void sendsTheInitialStateWithoutBeingAsked() throws Exception {
++        // A connection must learn Glass's state immediately, not at the next
++        // battery movement. This is what makes "alert on reconnect if still
++        // charging" work at all.
++        StateWriter writer = new StateWriter(sink, new GlassState(100, true));
++        Thread thread = new Thread(writer);
++        thread.start();
++
++        awaitBytes(FRAME_BYTES);
++        writer.stop();
++        thread.join(2000L);
++
++        assertFalse(thread.isAlive());
++        assertEquals(1, decodeAll().size());
++        assertEquals(new GlassState(100, true), decodeAll().get(0));
++    }
++
++    @Test
++    public void sendsNothingUntilThereIsSomethingToSend() throws Exception {
++        // A null initial state means no usable battery broadcast has arrived.
++        StateWriter writer = new StateWriter(sink, null);
++        Thread thread = new Thread(writer);
++        thread.start();
++
++        Thread.sleep(100L);
++        assertEquals(0, sink.size());
++
++        writer.offer(new GlassState(64, false));
++        awaitBytes(FRAME_BYTES);
++        writer.stop();
++        thread.join(2000L);
++
++        assertEquals(1, decodeAll().size());
++        assertEquals(new GlassState(64, false), decodeAll().get(0));
++    }
++
++    @Test
++    public void sendsEachOfferedState() throws Exception {
++        StateWriter writer = new StateWriter(sink, null);
++        Thread thread = new Thread(writer);
++        thread.start();
++
++        writer.offer(new GlassState(98, true));
++        awaitBytes(FRAME_BYTES);
++        writer.offer(new GlassState(100, true));
++        awaitBytes(FRAME_BYTES * 2);
++
++        writer.stop();
++        thread.join(2000L);
++
++        assertEquals(2, decodeAll().size());
++        assertEquals(98, decodeAll().get(0).batteryLevel);
++        assertEquals(100, decodeAll().get(1).batteryLevel);
++    }
++
++    @Test
++    public void stopEndsTheThreadEvenWithNothingPending() throws Exception {
++        StateWriter writer = new StateWriter(sink, null);
++        Thread thread = new Thread(writer);
++        thread.start();
++
++        writer.stop();
++        thread.join(2000L);
++
++        assertFalse(thread.isAlive());
++        assertEquals(0, sink.size());
++    }
++
++    @Test
++    public void offerAfterStopIsHarmless() throws Exception {
++        StateWriter writer = new StateWriter(sink, null);
++        Thread thread = new Thread(writer);
++        thread.start();
++        writer.stop();
++        thread.join(2000L);
++
++        // The watcher fires on the main thread and can land after a session
++        // has already been torn down. It must not throw.
++        writer.offer(new GlassState(100, true));
++
++        assertEquals(0, sink.size());
++    }
++
++    @Test
++    public void aDeadStreamEndsTheThreadRatherThanThrowing() throws Exception {
++        java.io.OutputStream broken = new java.io.OutputStream() {
++            @Override
++            public void write(int b) throws java.io.IOException {
++                throw new java.io.IOException("socket closed");
++            }
++        };
++
++        StateWriter writer = new StateWriter(broken, new GlassState(100, true));
++        Thread thread = new Thread(writer);
++        thread.start();
++        thread.join(2000L);
++
++        // run() must swallow it. An uncaught IOException on this thread would
++        // be a crash with no handler.
++        assertFalse(thread.isAlive());
++    }
++}
