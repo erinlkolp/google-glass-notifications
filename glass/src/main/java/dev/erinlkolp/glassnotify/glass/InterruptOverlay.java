@@ -27,7 +27,7 @@ public final class InterruptOverlay {
     private static final String TAG = "GlassNotify";
 
     /** Starting value; tune on hardware. Spec section 14. */
-    public static final long DISPLAY_MS = 5_000L;
+    public static final long DISPLAY_MS = 7_000L;
 
     private final Context context;
     private final WindowManager windowManager;
