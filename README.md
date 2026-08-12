@@ -616,7 +616,7 @@ against both devices during hardware verification on 2026-08-10 (see the row bel
 | `Protocol.MAX_TITLE_CHARS` | `80` | same | Fixed protocol constant. |
 | `Protocol.MAX_KEY_CHARS` | `96` | same | Fixed protocol constant, added to close a frame-size overflow path. |
 | `Protocol.MAX_APP_LABEL_CHARS` | `24` | same | Fixed protocol constant. |
-| `InterruptOverlay.DISPLAY_MS` | `5000` (5s) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/InterruptOverlay.java` | **Starting value, tune on hardware.** How long an interrupt card stays up before auto-dismissing. |
+| `InterruptOverlay.DISPLAY_MS` | `7000` (7s) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/InterruptOverlay.java` | **Starting value, tune on hardware.** How long an interrupt card stays up before auto-dismissing. Raised from the original 5s — the card read as too brief on hardware. |
 | `LinkClientService.PING_INTERVAL_MS` | `10000` (10s) | `phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java` | **Starting value, tune on hardware.** How often the phone sends a heartbeat. |
 | `SnapshotStore.STALE_AFTER_MS` | `30000` (30s) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/SnapshotStore.java` | **Starting value, tune on hardware.** Silence beyond this marks Glass's cached queue stale. Chosen as 3× the ping interval. |
 | `SwipeDetector.SWIPE_MIN_DX` | `60f` dp | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/SwipeDetector.java` | **Starting value, tune on hardware.** Minimum horizontal travel to register as a swipe rather than a tap. Explicitly called out in the plan as "chosen on reasoning, not measurement." |

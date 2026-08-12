@@ -62,7 +62,7 @@ public class InterruptPolicyTest {
     @Test
     public void collapsesAStormToTheNewestItem() {
         // Several arrive between snapshots. Show only the newest rather than
-        // queueing five seconds each - that pins the display on and drains
+        // queueing seven seconds each - that pins the display on and drains
         // the battery. Spec section 10.1.
         NotificationItem newest = item("c", Tier.INTERRUPT, 300L);
         Snapshot next = snapshot(newest, item("b", Tier.INTERRUPT, 200L), item("a", Tier.INTERRUPT, 100L));
