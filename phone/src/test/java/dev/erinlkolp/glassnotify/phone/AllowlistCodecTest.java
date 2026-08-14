@@ -63,4 +63,30 @@ public class AllowlistCodecTest {
         assertEquals(Tier.QUEUE,
                 AllowlistStore.decode(AllowlistStore.encode(rules)).get("com.example.app"));
     }
+
+    @Test
+    public void roundTripsTheChirpTier() {
+        Map<String, Tier> rules = new HashMap<String, Tier>();
+        rules.put("com.discord", Tier.INTERRUPT_CHIRP);
+
+        Map<String, Tier> decoded = AllowlistStore.decode(AllowlistStore.encode(rules));
+
+        assertEquals(1, decoded.size());
+        assertEquals(Tier.INTERRUPT_CHIRP, decoded.get("com.discord"));
+    }
+
+    @Test
+    public void rulesSavedBeforeTheChirpTierExistedStillDecode() {
+        // Hand-written in the on-disk format, as an older build would have left
+        // it: rules saved against protocol version 1 must survive the upgrade.
+        Set<String> legacy = new HashSet<String>();
+        legacy.add("org.thoughtcrime.securesms|1");
+        legacy.add("com.slack|2");
+
+        Map<String, Tier> decoded = AllowlistStore.decode(legacy);
+
+        assertEquals(2, decoded.size());
+        assertEquals(Tier.INTERRUPT, decoded.get("org.thoughtcrime.securesms"));
+        assertEquals(Tier.QUEUE, decoded.get("com.slack"));
+    }
 }

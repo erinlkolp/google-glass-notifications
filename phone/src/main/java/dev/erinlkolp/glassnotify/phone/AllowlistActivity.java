@@ -76,6 +76,8 @@ public final class AllowlistActivity extends Activity {
             store.put(packageName, Tier.QUEUE);
         } else if (current == Tier.QUEUE) {
             store.put(packageName, Tier.INTERRUPT);
+        } else if (current == Tier.INTERRUPT) {
+            store.put(packageName, Tier.INTERRUPT_CHIRP);
         } else {
             store.remove(packageName);
         }
@@ -84,6 +86,9 @@ public final class AllowlistActivity extends Activity {
     private static String describe(Tier tier) {
         if (tier == null) {
             return "Not shown";
+        }
+        if (tier == Tier.INTERRUPT_CHIRP) {
+            return "Interrupts + chirps";
         }
         return tier == Tier.INTERRUPT ? "Interrupts" : "Queued silently";
     }
