@@ -3,6 +3,7 @@
 # exercised without the phone. See spec section 12.4.
 #
 #   scripts/fake-notify.sh "Signal" "Jordan Reyes" "are you still good for 7pm?" INTERRUPT
+#   scripts/fake-notify.sh "Slack" "#eng" "deploy finished" INTERRUPT_CHIRP
 #   scripts/fake-notify.sh --clear
 set -euo pipefail
 
