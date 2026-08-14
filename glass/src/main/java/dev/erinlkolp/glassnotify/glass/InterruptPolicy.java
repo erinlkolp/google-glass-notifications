@@ -38,7 +38,7 @@ public final class InterruptPolicy {
 
         NotificationItem winner = null;
         for (NotificationItem item : next.items) {
-            if (item.tier != Tier.INTERRUPT) {
+            if (!item.tier.interrupts()) {
                 continue;
             }
             Long previouslyPostedAt = seen.get(item.key);

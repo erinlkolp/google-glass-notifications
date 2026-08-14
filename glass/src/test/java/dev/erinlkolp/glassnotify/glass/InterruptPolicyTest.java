@@ -102,4 +102,28 @@ public class InterruptPolicyTest {
 
         assertNull(InterruptPolicy.selectInterrupt(null, new Snapshot(1L, backlog)));
     }
+
+    @Test
+    public void aNewChirpTierItemAlsoInterrupts() {
+        NotificationItem incoming = item("a", Tier.INTERRUPT_CHIRP, 100L);
+
+        assertEquals(incoming, InterruptPolicy.selectInterrupt(empty(), snapshot(incoming)));
+    }
+
+    @Test
+    public void aStormOfMixedTiersCollapsesToTheNewest() {
+        NotificationItem older = item("a", Tier.INTERRUPT, 100L);
+        NotificationItem newest = item("b", Tier.INTERRUPT_CHIRP, 300L);
+        NotificationItem middle = item("c", Tier.INTERRUPT, 200L);
+
+        assertEquals(newest,
+                InterruptPolicy.selectInterrupt(empty(), snapshot(older, newest, middle)));
+    }
+
+    @Test
+    public void queuedItemsStillNeverInterrupt() {
+        NotificationItem incoming = item("a", Tier.QUEUE, 100L);
+
+        assertNull(InterruptPolicy.selectInterrupt(empty(), snapshot(incoming)));
+    }
 }
