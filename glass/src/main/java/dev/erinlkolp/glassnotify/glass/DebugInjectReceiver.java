@@ -88,6 +88,7 @@ public final class DebugInjectReceiver extends BroadcastReceiver {
             public void run() {
                 NotificationItem interrupt = InterruptPolicy.selectInterrupt(previous, next);
                 if (interrupt != null) {
+                    GlassNotify.chirp(context).playIfNeeded(interrupt.tier);
                     overlay.show(interrupt);
                 }
             }
