@@ -18,6 +18,7 @@ public final class GlassNotify {
     private static SnapshotStore store;
     private static PeerPin peerPin;
     private static InterruptOverlay overlay;
+    private static ChirpPlayer chirp;
 
     private GlassNotify() {
     }
@@ -51,5 +52,18 @@ public final class GlassNotify {
             overlay = new InterruptOverlay(context.getApplicationContext());
         }
         return overlay;
+    }
+
+    /**
+     * One player for the whole process, for the same reason there is one
+     * overlay. Constructing it renders the tone and, on the first run after
+     * install, sets the notification volume.
+     */
+    public static synchronized ChirpPlayer chirp(Context context) {
+        if (chirp == null) {
+            Context app = context.getApplicationContext();
+            chirp = new ChirpPlayer(app, app.getSharedPreferences(PREFS, Context.MODE_PRIVATE));
+        }
+        return chirp;
     }
 }
