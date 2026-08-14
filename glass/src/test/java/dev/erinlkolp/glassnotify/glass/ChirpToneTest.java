@@ -49,20 +49,6 @@ public class ChirpToneTest {
     }
 
     @Test
-    public void theSweepRisesRatherThanJumping() {
-        // Proves the phase accumulator sweeps continuously: the back half of a
-        // rising chirp must contain more cycles than the front half.
-        short[] pcm = ChirpTone.renderDefault();
-        int half = pcm.length / 2;
-
-        int front = upwardCrossings(pcm, 0, half);
-        int back = upwardCrossings(pcm, half, pcm.length);
-
-        assertTrue("front " + front + " should have fewer cycles than back " + back,
-                back > front);
-    }
-
-    @Test
     public void theSweepAccumulatesPhaseRatherThanRecomputingIt() {
         // Total cycles are the integral of frequency over time: with phase
         // accumulated per sample that is the mean frequency, 1600 Hz over

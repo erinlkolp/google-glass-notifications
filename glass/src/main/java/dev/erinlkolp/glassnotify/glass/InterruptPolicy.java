@@ -5,7 +5,6 @@ import java.util.Map;
 
 import dev.erinlkolp.glassnotify.wire.NotificationItem;
 import dev.erinlkolp.glassnotify.wire.Snapshot;
-import dev.erinlkolp.glassnotify.wire.Tier;
 
 /**
  * Decides whether an incoming snapshot should light up the display, and with what.

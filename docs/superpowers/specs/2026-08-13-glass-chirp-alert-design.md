@@ -126,8 +126,8 @@ operates on frame *types*; this is a malformed frame *body*, one layer down.
 
 | Combination | Behaviour |
 |---|---|
-| New phone, old Glass | Version mismatch. Glass rejects the frame at `LinkServerService.java:272` and surfaces the mismatch state. Loud and immediate. |
-| Old phone, new Glass | Same mismatch, caught at `LinkReader.java:68`. |
+| New phone, old Glass | Version mismatch. Glass rejects the frame and surfaces the mismatch state at `LinkServerService.java:272`. Loud and immediate. |
+| Old phone, new Glass | Same mismatch, still caught at `LinkServerService.java:272` — the forward channel (phone to Glass) is what carries the mismatched version, and Glass reads that. `LinkReader.java:68` sees the same mismatch on the reverse channel a moment later, but by its own documented design returns silently there, so it never surfaces anything; the refusal the wearer actually sees comes from the Glass side. |
 | New both | Works. |
 
 **Operational consequence:** both APKs must be reinstalled together. A half-updated pair is a dead
@@ -303,8 +303,15 @@ Host unit tests, alongside the existing `glass/src/test` suite:
   - Frame count equals `sampleRate × ms / 1000`.
   - No sample clips past `Short.MAX_VALUE`.
   - First and last samples sit near zero, proving the envelope suppresses the click.
-  - Zero-crossing intervals shrink monotonically across a rising sweep, proving the phase
-    accumulator sweeps continuously rather than jumping (§6.1).
+  - The total zero-crossing count over the full sweep lands at 240 ± 3 (asserted 237-243): the
+    integral of frequency over time for an accumulated-phase sweep from 800 Hz to 2400 Hz over
+    150 ms is the mean frequency, 1600 Hz, giving 240 cycles. A closed-form implementation that
+    recomputes phase as `2*PI*f(i)*i/rate` instead sweeps at twice the slope and lands near 360,
+    so this count is what discriminates the correct implementation from the plausible wrong one
+    (§6.1). An earlier draft of this test only checked that the back half of the sweep had more
+    cycles than the front half, but a closed-form bug also produces a rising crossing count, so
+    that assertion did not actually prove continuous phase accumulation and was replaced by this
+    one.
   - A 1 ms burst does not divide by zero in the ramp guard.
 - **`TierTest`** — `fromCode(3)` resolves; `fromCode(4)` returns null; `interrupts()` and `chirps()`
   are correct for all three values. Guards the code-vs-ordinal invariant.

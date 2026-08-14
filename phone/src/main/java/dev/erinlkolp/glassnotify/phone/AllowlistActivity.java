@@ -22,9 +22,9 @@ import dev.erinlkolp.glassnotify.wire.Tier;
 /**
  * Per-app tier configuration.
  *
- * Tapping an app cycles it OFF -> QUEUE -> INTERRUPT -> OFF. A three-state
- * cycle on one row beats a checkbox plus a separate tier control, and the
- * whole list is short enough that scanning it is fine.
+ * Tapping an app cycles it OFF -> QUEUE -> INTERRUPT -> INTERRUPT_CHIRP -> OFF.
+ * A four-state cycle on one row beats a checkbox plus a separate tier control,
+ * and the whole list is short enough that scanning it is fine.
  */
 public final class AllowlistActivity extends Activity {
 

@@ -24,22 +24,23 @@ public final class ChirpPlayer {
     private static final String TAG = "GlassNotify";
 
     /** Written once per install, then never again, so a later manual change sticks. */
-    static final String KEY_VOLUME_INITIALIZED = "chirp_volume_initialized";
+    private static final String KEY_VOLUME_INITIALIZED = "chirp_volume_initialized";
 
     /**
      * Of a maximum of 7. The device ships at 7, so this is a deliberate step
      * down from the full-scale tones auditioned on hardware. Spec section 6.5.
      */
-    static final int INITIAL_VOLUME_INDEX = 5;
+    private static final int INITIAL_VOLUME_INDEX = 5;
 
     private final AudioManager audioManager;
+    private final SharedPreferences prefs;
     private final short[] pcm;
 
     public ChirpPlayer(Context context, SharedPreferences prefs) {
         this.audioManager = (AudioManager) context.getApplicationContext()
                 .getSystemService(Context.AUDIO_SERVICE);
+        this.prefs = prefs;
         this.pcm = ChirpTone.renderDefault();
-        initializeVolumeOnce(prefs);
     }
 
     /**
@@ -51,6 +52,10 @@ public final class ChirpPlayer {
         if (tier == null || !tier.chirps()) {
             return;
         }
+        // Gated behind the chirps() check above, not the constructor: a user
+        // who never enables chirping for any app must never have their
+        // device-wide notification volume rewritten at all.
+        initializeVolumeOnce();
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -93,7 +98,7 @@ public final class ChirpPlayer {
      * there is no way to set the level at all. Written once and then left
      * alone, so "adb shell settings put system volume_notification N" sticks.
      */
-    private void initializeVolumeOnce(SharedPreferences prefs) {
+    private void initializeVolumeOnce() {
         if (prefs.getBoolean(KEY_VOLUME_INITIALIZED, false)) {
             return;
         }
@@ -101,9 +106,12 @@ public final class ChirpPlayer {
             audioManager.setStreamVolume(
                     AudioManager.STREAM_NOTIFICATION, INITIAL_VOLUME_INDEX, 0);
             Log.i(TAG, "chirp: set initial notification volume to " + INITIAL_VOLUME_INDEX);
+            // Only persisted once the write actually succeeds - if it threw,
+            // the level is still at the device default and a later boot
+            // deserves another attempt rather than being locked out forever.
+            prefs.edit().putBoolean(KEY_VOLUME_INITIALIZED, true).apply();
         } catch (RuntimeException e) {
             Log.w(TAG, "chirp: could not set initial notification volume", e);
         }
-        prefs.edit().putBoolean(KEY_VOLUME_INITIALIZED, true).apply();
     }
 }

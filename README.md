@@ -496,7 +496,7 @@ only ever affects debug builds on a device Erin controls.
 ./gradlew :phone:testDebugUnitTest
 ```
 
-As of the last full run: **147 unit tests pass** (58 in `wire`, 47 in `glass`, 42 in `phone`), and
+As of the last full run: **162 unit tests pass** (62 in `wire`, 56 in `glass`, 44 in `phone`), and
 both APKs build cleanly except for one accepted, deliberately-unfixed deprecation note (see
 [Known limitations](#known-limitations-and-parked-items)).
 
@@ -652,7 +652,7 @@ against both devices during hardware verification on 2026-08-10 (see the row bel
 Stated plainly so nothing above is mistaken for more settled than it is:
 
 - **Hardware verification was completed on 2026-08-10**, against both devices (Glass Explorer
-  Edition and the LG V30). All 147 unit tests pass and both APKs build cleanly. The RFCOMM
+  Edition and the LG V30). All 162 unit tests pass and both APKs build cleanly. The RFCOMM
   concurrency (single-writer socket handling in `LinkClientService`, the accept-loop lifecycle in
   `LinkServerService`, the connect/destroy race handling, and the new `GLASS_STATE` reverse channel)
   was exercised by running the two devices against each other, not only by code review.

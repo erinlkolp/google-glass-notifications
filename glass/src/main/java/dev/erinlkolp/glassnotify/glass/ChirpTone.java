@@ -17,7 +17,7 @@ public final class ChirpTone {
     private ChirpTone() {
     }
 
-    /** The tone as tuned on hardware. Spec section 6.1. */
+    /** Chosen by ear from candidate tones during the spike; a starting value to tune on hardware. Spec section 6.1. */
     public static short[] renderDefault() {
         return render(START_HZ, END_HZ, DURATION_MS, SAMPLE_RATE);
     }
