@@ -63,6 +63,21 @@ public class ChirpToneTest {
     }
 
     @Test
+    public void theSweepAccumulatesPhaseRatherThanRecomputingIt() {
+        // Total cycles are the integral of frequency over time: with phase
+        // accumulated per sample that is the mean frequency, 1600 Hz over
+        // 0.15 s = 240 cycles. Computing phase as 2*PI*f(i)*i/rate instead
+        // sweeps at twice the slope and lands near 360, so this count is what
+        // separates the correct implementation from the plausible wrong one.
+        short[] pcm = ChirpTone.renderDefault();
+
+        int cycles = upwardCrossings(pcm, 0, pcm.length);
+
+        assertTrue("expected about 240 cycles, got " + cycles,
+                cycles >= 237 && cycles <= 243);
+    }
+
+    @Test
     public void aVeryShortBurstDoesNotDivideByZeroInTheRampGuard() {
         short[] pcm = ChirpTone.render(800, 2400, 1, 44100);
 
