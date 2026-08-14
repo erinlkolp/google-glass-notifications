@@ -6,7 +6,7 @@ import java.util.UUID;
 public final class Protocol {
 
     /** Bumped on any incompatible change to framing or message bodies. */
-    public static final int VERSION = 1;
+    public static final int VERSION = 2;
 
     /**
      * Frames larger than this are rejected before any allocation, so a corrupted

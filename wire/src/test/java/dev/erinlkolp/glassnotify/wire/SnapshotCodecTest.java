@@ -268,4 +268,16 @@ public class SnapshotCodecTest {
             // The phone caps before building; this is the belt-and-braces check.
         }
     }
+
+    @Test
+    public void roundTripsTheChirpTier() throws IOException {
+        NotificationItem chirping = new NotificationItem("k1", "Signal", "Jordan Reyes",
+                "are you still good for 7pm?", 1000L, Tier.INTERRUPT_CHIRP);
+        Snapshot original = new Snapshot(7L, Arrays.asList(chirping));
+
+        Snapshot decoded = SnapshotCodec.decode(SnapshotCodec.encode(original));
+
+        assertEquals(1, decoded.items.size());
+        assertEquals(Tier.INTERRUPT_CHIRP, decoded.items.get(0).tier);
+    }
 }
