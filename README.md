@@ -632,7 +632,7 @@ against both devices during hardware verification on 2026-08-10 (see the row bel
 | `ChirpTone.START_HZ` | `800` (Hz) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/ChirpTone.java` | **Starting value, tune on hardware.** Sweep start frequency. Chosen by ear from several candidate tones during the 2026-08-13 spike, all played at full stream volume (7 of 7). |
 | `ChirpTone.END_HZ` | `2400` (Hz) | same | **Starting value, tune on hardware.** Sweep end frequency, chosen the same way. Lower this first if the chirp proves audible to bystanders — see [Known limitations](#known-limitations-and-parked-items) — leakage worsens with frequency. |
 | `ChirpTone.DURATION_MS` | `150` (ms) | same | **Starting value, tune on hardware.** Sweep duration, chosen the same way; short enough that even an audible leak reads as a click rather than a recognisable alert. |
-| `ChirpPlayer.INITIAL_VOLUME_INDEX` | `5` (of 7 max) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/ChirpPlayer.java` | **Starting value, tune on hardware.** `STREAM_NOTIFICATION` level written once per install. Unlike the row above, this has not been heard — every candidate tone in the spike was auditioned at the device's maximum of 7; 5 is a deliberate step down from that, not a measured value. If it proves audible to bystanders and lowering `ChirpTone.END_HZ` isn't enough, lower this next. |
+| `ChirpPlayer.INITIAL_VOLUME_INDEX` | `5` (of 7 max) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/ChirpPlayer.java` | **Confirmed in use, 2026-08-14.** `STREAM_NOTIFICATION` level written once per install. Chosen blind — every candidate tone in the spike was auditioned at the device's maximum of 7, so 5 was a deliberate step down that nobody had heard — and then confirmed right after a day of real notifications on the head. Do not move it without a reason. If the chirp proves audible to bystanders, lower `ChirpTone.END_HZ` first; this is the second lever, not the first. |
 | `LinkClientService.PING_INTERVAL_MS` | `10000` (10s) | `phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java` | **Starting value, tune on hardware.** How often the phone sends a heartbeat. |
 | `SnapshotStore.STALE_AFTER_MS` | `30000` (30s) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/SnapshotStore.java` | **Starting value, tune on hardware.** Silence beyond this marks Glass's cached queue stale. Chosen as 3× the ping interval. |
 | `SwipeDetector.SWIPE_MIN_DX` | `60f` dp | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/SwipeDetector.java` | **Starting value, tune on hardware.** Minimum horizontal travel to register as a swipe rather than a tap. Explicitly called out in the plan as "chosen on reasoning, not measurement." |
@@ -662,14 +662,14 @@ Stated plainly so nothing above is mistaken for more settled than it is:
     battery level, the alert would never have fired at all on this hardware. This validates the
     level-based trigger chosen in the charge-alert design, §4 (see also
     [Tuned values](#13-tuned-values) → `ChargeAlertPolicy.FULL_LEVEL`).
-- **Whether the chirp is audible to people nearby has not been tested.** Bone conduction
-  transducers leak, and leakage worsens with frequency — the sweep tops out at 2400 Hz. Testing
-  this needs a second listener and one was not available, so this is untested rather than verified
-  quiet. If it proves audible in use, lower `ChirpTone.END_HZ` first, then
-  `ChirpPlayer.INITIAL_VOLUME_INDEX` (see [Tuned values](#13-tuned-values)). Separately, whether the
-  chirp is audible to the wearer on this actual build is still pending confirmation from Erin — the
-  device verification steps in `docs/superpowers/specs/2026-08-13-glass-chirp-alert-design.md`
-  §8.1 have not yet been run.
+- **The chirp leaks only into silence.** Confirmed in use, 2026-08-14: in a dead-silent room
+  someone else can hear it; with even a low level of ambient noise it is effectively inaudible to
+  anyone but the wearer, who hears it fine either way. The wearer's path is bone conduction,
+  coupled to the skull and largely independent of room noise, while a bystander hears only the
+  airborne leak — which almost any background sound masks. So it is discreet in the places
+  discretion matters and audible mainly where being overheard costs least. No change planned; if a
+  silent setting ever becomes the common case, lower `ChirpTone.END_HZ` first, then
+  `ChirpPlayer.INITIAL_VOLUME_INDEX` (see [Tuned values](#13-tuned-values)).
 - **Touch behaviour has no automated coverage and cannot get any**, per the `adb shell input`
   limitation described in [Testing](#10-testing). This is not a gap to be closed later with more
   unit tests — it structurally cannot be closed that way.
