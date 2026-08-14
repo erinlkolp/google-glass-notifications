@@ -341,8 +341,17 @@ Whether someone standing next to Erin can hear the chirp was never measured. Bon
 transducers leak, and leakage worsens at higher frequencies — the sweep tops out at 2400 Hz, well
 into the range where leakage is plausible.
 
-This is a deliberate acceptance, not an oversight. Erin will test it in use. If the chirp proves
-audible to others, the fix is the constants in §6.1 and nothing else.
+This is a deliberate acceptance, not an oversight. A leakage test needs a second person in the room
+and none was available, so it was not attempted rather than attempted and passed — the distinction
+matters if this ships and later turns out to be audible.
+
+Two things reduce the risk. The shipped level is 5 of 7, a step down from the full-scale tones
+auditioned during the spike. And the chirp is 150 ms, short enough that even an audible leak reads
+as a click rather than a recognisable alert.
+
+If it does prove audible in use, the fix is the constants in §6.1 — lowering the 2400 Hz ceiling is
+the first lever, since leakage worsens with frequency — or the first-run level in §6.5. No
+structural change is implied either way.
 
 ### 9.2 No chirp cooldown
 
