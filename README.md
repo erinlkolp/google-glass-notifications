@@ -662,14 +662,14 @@ Stated plainly so nothing above is mistaken for more settled than it is:
     battery level, the alert would never have fired at all on this hardware. This validates the
     level-based trigger chosen in the charge-alert design, §4 (see also
     [Tuned values](#13-tuned-values) → `ChargeAlertPolicy.FULL_LEVEL`).
-- **Whether the chirp is audible to people nearby has not been tested.** Bone conduction
-  transducers leak, and leakage worsens with frequency — the sweep tops out at 2400 Hz. Testing
-  this needs a second listener and one was not available, so this is untested rather than verified
-  quiet. If it proves audible in use, lower `ChirpTone.END_HZ` first, then
-  `ChirpPlayer.INITIAL_VOLUME_INDEX` (see [Tuned values](#13-tuned-values)). Audibility to the
-  *wearer* is a separate question and is now settled: the chirp was used for a day of real
-  notifications on 2026-08-14 at level 5 and works well. That says nothing about leakage, which
-  still needs a second listener.
+- **The chirp leaks only into silence.** Confirmed in use, 2026-08-14: in a dead-silent room
+  someone else can hear it; with even a low level of ambient noise it is effectively inaudible to
+  anyone but the wearer, who hears it fine either way. The wearer's path is bone conduction,
+  coupled to the skull and largely independent of room noise, while a bystander hears only the
+  airborne leak — which almost any background sound masks. So it is discreet in the places
+  discretion matters and audible mainly where being overheard costs least. No change planned; if a
+  silent setting ever becomes the common case, lower `ChirpTone.END_HZ` first, then
+  `ChirpPlayer.INITIAL_VOLUME_INDEX` (see [Tuned values](#13-tuned-values)).
 - **Touch behaviour has no automated coverage and cannot get any**, per the `adb shell input`
   limitation described in [Testing](#10-testing). This is not a gap to be closed later with more
   unit tests — it structurally cannot be closed that way.

@@ -342,23 +342,30 @@ transducer — is device verification, in this order:
 
 ## 9. Known risks
 
-### 9.1 Bystander audibility is untested
+### 9.1 Bystander audibility: leaks only into silence
 
-Whether someone standing next to Erin can hear the chirp was never measured. Bone conduction
-transducers leak, and leakage worsens at higher frequencies — the sweep tops out at 2400 Hz, well
-into the range where leakage is plausible.
+**Resolved in use, 2026-08-14.** This section originally recorded the question as untested, because
+a leakage test needs a second person and none was available at design time. It has since been
+answered in ordinary use, and the answer is more useful than a yes or no:
 
-This is a deliberate acceptance, not an oversight. A leakage test needs a second person in the room
-and none was available, so it was not attempted rather than attempted and passed — the distinction
-matters if this ships and later turns out to be audible.
+- In a **dead-silent room**, the chirp is audible to someone else.
+- With **even a low level of ambient noise**, it is effectively inaudible to others.
+- The wearer hears it fine in both cases.
 
-Two things reduce the risk. The shipped level is 5 of 7, a step down from the full-scale tones
-auditioned during the spike. And the chirp is 150 ms, short enough that even an audible leak reads
-as a click rather than a recognisable alert.
+That asymmetry is what makes the current constants worth keeping. The wearer's path is bone
+conduction — coupled directly to the skull, largely independent of room noise — while a bystander
+hears only the airborne leak, which sits low enough to be masked by almost any background sound.
+The 150 ms duration helps: even in silence the leak reads as a brief click rather than a
+recognisable alert.
 
-If it does prove audible in use, the fix is the constants in §6.1 — lowering the 2400 Hz ceiling is
-the first lever, since leakage worsens with frequency — or the first-run level in §6.5. No
-structural change is implied either way.
+**No change is being made.** The prediction that drove the original caution — that leakage worsens
+with frequency and 2400 Hz is well into the range where it is plausible — turned out to be correct
+in the silent case and irrelevant in every other. Practically, this means the chirp is discreet in
+the environments where discretion matters (offices, transit, anywhere with other people in it) and
+audible in the one environment where being overheard costs least.
+
+If a genuinely silent setting later proves to be the common case, the levers are unchanged: lower
+the 2400 Hz ceiling in §6.1 first, then the first-run level in §6.5.
 
 ### 9.2 No chirp cooldown
 
