@@ -5,7 +5,6 @@ import java.util.Map;
 
 import dev.erinlkolp.glassnotify.wire.NotificationItem;
 import dev.erinlkolp.glassnotify.wire.Snapshot;
-import dev.erinlkolp.glassnotify.wire.Tier;
 
 /**
  * Decides whether an incoming snapshot should light up the display, and with what.
@@ -38,7 +37,7 @@ public final class InterruptPolicy {
 
         NotificationItem winner = null;
         for (NotificationItem item : next.items) {
-            if (item.tier != Tier.INTERRUPT) {
+            if (!item.tier.interrupts()) {
                 continue;
             }
             Long previouslyPostedAt = seen.get(item.key);

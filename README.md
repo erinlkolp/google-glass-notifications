@@ -172,7 +172,7 @@ where most of `wire`'s test suite lives.
 
 ```
 uint32  length      big-endian; counts every byte AFTER this field (version + type + body)
-uint8   version     protocol version (currently 1)
+uint8   version     protocol version (currently 2)
 uint8   type        1 = HELLO, 2 = SNAPSHOT, 3 = PING
 ...     body        type-specific payload
 ```
@@ -182,6 +182,14 @@ declaring a length over 64KB (`Protocol.MAX_FRAME_BYTES`) is rejected **before a
 allocated**, so a corrupted length field cannot be turned into an `OutOfMemoryError`. A version the
 receiver does not recognise is not rejected outright — it is surfaced up so Glass can show an
 explicit "phone app out of date" state instead of a generic stream error.
+
+`Protocol.VERSION` bumped from 1 to 2 for the `INTERRUPT_CHIRP` tier: an old Glass build cannot
+decode tier code 3, and a `ProtocolException` mid-snapshot would silently destroy every other
+notification travelling with it, not just the chirp-tier one. That is exactly the incompatible
+change the version field exists to catch. The consequence is operational, not just internal: both
+APKs must be reinstalled together after this change. A half-updated pair is a dead link, not a
+degraded one — the mismatch is caught immediately and loudly (see the troubleshooting table below)
+rather than quietly dropping notifications.
 
 Encoding uses plain `java.io.DataOutputStream`/`DataInputStream`, not JSON. Android ships its own
 reimplementation of `org.json` that differs from the one available to a host JVM test, which would
@@ -195,8 +203,8 @@ cases to get wrong.
   Bluetooth device name and address. Fails fast on a version mismatch (see above).
 - **`SNAPSHOT`** — the entire current notification queue: a monotonically increasing snapshot id,
   then up to 20 items (`Protocol.MAX_ITEMS`), each with `key`, `appLabel`, `title`, `text`,
-  `postedAt` (epoch millis), and `tier` (`INTERRUPT` or `QUEUE`). Ordered newest-first by the phone;
-  Glass renders the list as given and has no opinion about ordering.
+  `postedAt` (epoch millis), and `tier` (`INTERRUPT`, `QUEUE`, or `INTERRUPT_CHIRP`). Ordered
+  newest-first by the phone; Glass renders the list as given and has no opinion about ordering.
 - **`PING`** — sent every 10 seconds by the phone (`LinkClientService.PING_INTERVAL_MS`), empty
   body. RFCOMM sockets can half-die with neither end noticing — the heartbeat is what lets the
   phone detect a dead socket and start backing off promptly, and lets Glass mark its cached
@@ -341,10 +349,11 @@ adb -s VS9967edd915b shell dumpsys deviceidle whitelist | grep dev.erinlkolp.gla
 Expected: a line listing the phone app's package.
 
 **4. Configure the allowlist.** Still in the phone app, open "Choose which apps to show"
-(`AllowlistActivity`) and set at least one app to `INTERRUPT` and at least one to `QUEUE`. Pick
-something you can trigger on demand for testing. There is no `adb` verification step for this one —
-it is stored in `SharedPreferences` on the phone and has no external side effect until a
-notification actually fires.
+(`AllowlistActivity`) and set at least one app to `INTERRUPT` and at least one to `QUEUE`. Set a
+third to `INTERRUPT_CHIRP` if you want to test the chirp sound on this pass — tapping an app cycles
+it through all three tiers before returning to "not shown." Pick something you can trigger on demand
+for testing. There is no `adb` verification step for this one — it is stored in `SharedPreferences`
+on the phone and has no external side effect until a notification actually fires.
 
 Once all four are done, `SetupActivity.onResume()` starts `LinkClientService` automatically as soon
 as notification access is detected — there is no separate "connect" button.
@@ -453,6 +462,9 @@ scripts/fake-notify.sh "Signal" "Jordan Reyes" "are you still good for 7pm?"
 # An INTERRUPT-tier item — this one wakes the display
 scripts/fake-notify.sh "Discord" "#general" "new message from Sam" INTERRUPT
 
+# An INTERRUPT_CHIRP-tier item — wakes the display and plays the chirp tone
+scripts/fake-notify.sh "Slack" "#eng" "deploy finished" INTERRUPT_CHIRP
+
 # Clear the injected queue back to empty
 scripts/fake-notify.sh --clear
 ```
@@ -484,7 +496,7 @@ only ever affects debug builds on a device Erin controls.
 ./gradlew :phone:testDebugUnitTest
 ```
 
-As of the last full run: **147 unit tests pass** (58 in `wire`, 47 in `glass`, 42 in `phone`), and
+As of the last full run: **162 unit tests pass** (62 in `wire`, 56 in `glass`, 44 in `phone`), and
 both APKs build cleanly except for one accepted, deliberately-unfixed deprecation note (see
 [Known limitations](#known-limitations-and-parked-items)).
 
@@ -531,7 +543,7 @@ running on hardware** — see [Known limitations](#known-limitations-and-parked-
 | **Nothing appears on Glass at all** | Most commonly: devices not bonded, notification access not granted, or the allowlist has nothing configured. | Walk through [First-run setup](#8-first-run-setup) again — each step has a verification command; find which one actually failed rather than guessing. |
 | **Interrupts appear fine while the Glass UI is awake, but with the display asleep and locked the screen wakes to the lock screen and goes straight back off, showing no card** | The overlay is rendering *underneath* the keyguard. Fixed as of `a383c3e`; if you still see it, the installed APK predates that commit. Root cause: `TYPE_SYSTEM_ALERT` sits at window layer `101000`, below `KeyguardScrim` (`131000`) and the `StatusBar` that draws the keyguard on 5.x (`151000`). Note `FLAG_SHOW_WHEN_LOCKED` does **not** fix this — it controls whether the keyguard force-*hides* a window, and here the keyguard is stacked above rather than hiding anything. | Reinstall the current Glass APK. To confirm the layering yourself: `adb -s 0123456789ABCDEF shell dumpsys window windows \| grep -E "Window #\|mBaseLayer="` while an interrupt is showing — the `glassnotify.glass` overlay should read `mBaseLayer=221000`, above the StatusBar's `151000`. |
 | **Glass shows "Not connected" (stale queue)** | No `PING` received for 30s (`SnapshotStore.STALE_AFTER_MS`). The link died and the phone hasn't reconnected yet, or Bluetooth is off on one side. | Check `adb -s VS9967edd915b shell dumpsys bluetooth_manager \| grep -iE "enabled"` on both devices. If both are on and bonded, give the phone's backoff up to 60s (`Backoff.MAX_MS`) to retry, or force it with the app's "wake" path by reopening the phone app. |
-| **Glass shows "Phone app out of date"** | `LinkServerService` read a frame whose `version` field does not match `Protocol.VERSION` (currently `1`). This means the two APKs were built from different, incompatible commits of `wire`. | Rebuild and reinstall **both** APKs from the same checkout — `wire` is shared, but an old APK on one side does not get the new protocol automatically. |
+| **Glass shows "Phone app out of date"** | `LinkServerService` read a frame whose `version` field does not match `Protocol.VERSION` (currently `2`). This means the two APKs were built from different, incompatible commits of `wire`. | Rebuild and reinstall **both** APKs from the same checkout — `wire` is shared, but an old APK on one side does not get the new protocol automatically. |
 | **Glass refuses the connection after a reflash** | The wipe regenerated Glass's Bluetooth MAC (§3), which breaks the OS-level bond. Separately, Glass's own `PeerPin` trust-on-first-use pin may still reference the phone's old identity from before the reflash. | Re-pair the two devices from scratch (step 1 of [First-run setup](#8-first-run-setup)), then clear the pin as in [Recovery](#12-recovery) so the next connection re-pins cleanly. |
 | **The phone's persistent notification says "Connected to Glass," but nothing shows on Glass and the queue stays stale** | An **unpinned MAC is refused silently.** `LinkServerService.serve()` checks `PeerPin.isAllowed()` immediately on accept; if it fails, Glass logs `"refusing connection from unpinned device …"` and returns — closing the socket — without ever sending anything back. The phone side (`LinkClientService`) sets its "Connected" status the instant TCP-level `connect()` succeeds, **before** any data has actually been exchanged, and has no read side at all, so it can never learn the connection was rejected. | `adb -s 0123456789ABCDEF logcat -s GlassNotify` and look for "refusing connection from unpinned device." If present, clear Glass's pin (see [Recovery](#12-recovery)) and reconnect — the next connection attempt will pin the current phone address. |
 | **V30 not visible to `adb`, or stuck `unauthorized`** | This is almost always the **USB debugging toggle**, not the USB connection mode (Charging/MTP/PTP) — those are orthogonal settings on this device. Cycling the USB mode changes the advertised product ID (`62ce`, `62c1`, `62c9` were all observed) but never publishes the ADB interface if debugging is off. Watch for **USB interface class `255` / subclass `66` / protocol `1`** (the ADB interface) in `lsusb -v`, not for a specific product ID. | Confirm Developer Options → USB debugging is on. If it shows `unauthorized`, run `adb kill-server && adb start-server` **with the phone screen unlocked** (see next row) and re-check. |
@@ -609,7 +621,7 @@ against both devices during hardware verification on 2026-08-10 (see the row bel
 
 | Constant | Value | Where | Status |
 |---|---|---|---|
-| `Protocol.VERSION` | `1` | `wire/src/main/java/dev/erinlkolp/glassnotify/wire/Protocol.java` | Fixed protocol constant. |
+| `Protocol.VERSION` | `2` | `wire/src/main/java/dev/erinlkolp/glassnotify/wire/Protocol.java` | Fixed protocol constant. |
 | `Protocol.MAX_FRAME_BYTES` | `65536` (64 × 1024) | same | Fixed protocol constant. |
 | `Protocol.MAX_ITEMS` | `20` | same | Fixed protocol constant. |
 | `Protocol.MAX_TEXT_CHARS` | `240` | same | Fixed protocol constant. |
@@ -617,6 +629,10 @@ against both devices during hardware verification on 2026-08-10 (see the row bel
 | `Protocol.MAX_KEY_CHARS` | `96` | same | Fixed protocol constant, added to close a frame-size overflow path. |
 | `Protocol.MAX_APP_LABEL_CHARS` | `24` | same | Fixed protocol constant. |
 | `InterruptOverlay.DISPLAY_MS` | `7000` (7s) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/InterruptOverlay.java` | **Starting value, tune on hardware.** How long an interrupt card stays up before auto-dismissing. Raised from the original 5s — the card read as too brief on hardware. |
+| `ChirpTone.START_HZ` | `800` (Hz) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/ChirpTone.java` | **Starting value, tune on hardware.** Sweep start frequency. Chosen by ear from several candidate tones during the 2026-08-13 spike, all played at full stream volume (7 of 7). |
+| `ChirpTone.END_HZ` | `2400` (Hz) | same | **Starting value, tune on hardware.** Sweep end frequency, chosen the same way. Lower this first if the chirp proves audible to bystanders — see [Known limitations](#known-limitations-and-parked-items) — leakage worsens with frequency. |
+| `ChirpTone.DURATION_MS` | `150` (ms) | same | **Starting value, tune on hardware.** Sweep duration, chosen the same way; short enough that even an audible leak reads as a click rather than a recognisable alert. |
+| `ChirpPlayer.INITIAL_VOLUME_INDEX` | `5` (of 7 max) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/ChirpPlayer.java` | **Starting value, tune on hardware.** `STREAM_NOTIFICATION` level written once per install. Unlike the row above, this has not been heard — every candidate tone in the spike was auditioned at the device's maximum of 7; 5 is a deliberate step down from that, not a measured value. If it proves audible to bystanders and lowering `ChirpTone.END_HZ` isn't enough, lower this next. |
 | `LinkClientService.PING_INTERVAL_MS` | `10000` (10s) | `phone/src/main/java/dev/erinlkolp/glassnotify/phone/LinkClientService.java` | **Starting value, tune on hardware.** How often the phone sends a heartbeat. |
 | `SnapshotStore.STALE_AFTER_MS` | `30000` (30s) | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/SnapshotStore.java` | **Starting value, tune on hardware.** Silence beyond this marks Glass's cached queue stale. Chosen as 3× the ping interval. |
 | `SwipeDetector.SWIPE_MIN_DX` | `60f` dp | `glass/src/main/java/dev/erinlkolp/glassnotify/glass/SwipeDetector.java` | **Starting value, tune on hardware.** Minimum horizontal travel to register as a swipe rather than a tap. Explicitly called out in the plan as "chosen on reasoning, not measurement." |
@@ -636,7 +652,7 @@ against both devices during hardware verification on 2026-08-10 (see the row bel
 Stated plainly so nothing above is mistaken for more settled than it is:
 
 - **Hardware verification was completed on 2026-08-10**, against both devices (Glass Explorer
-  Edition and the LG V30). All 147 unit tests pass and both APKs build cleanly. The RFCOMM
+  Edition and the LG V30). All 162 unit tests pass and both APKs build cleanly. The RFCOMM
   concurrency (single-writer socket handling in `LinkClientService`, the accept-loop lifecycle in
   `LinkServerService`, the connect/destroy race handling, and the new `GLASS_STATE` reverse channel)
   was exercised by running the two devices against each other, not only by code review.
@@ -646,6 +662,14 @@ Stated plainly so nothing above is mistaken for more settled than it is:
     battery level, the alert would never have fired at all on this hardware. This validates the
     level-based trigger chosen in the charge-alert design, §4 (see also
     [Tuned values](#13-tuned-values) → `ChargeAlertPolicy.FULL_LEVEL`).
+- **Whether the chirp is audible to people nearby has not been tested.** Bone conduction
+  transducers leak, and leakage worsens with frequency — the sweep tops out at 2400 Hz. Testing
+  this needs a second listener and one was not available, so this is untested rather than verified
+  quiet. If it proves audible in use, lower `ChirpTone.END_HZ` first, then
+  `ChirpPlayer.INITIAL_VOLUME_INDEX` (see [Tuned values](#13-tuned-values)). Separately, whether the
+  chirp is audible to the wearer on this actual build is still pending confirmation from Erin — the
+  device verification steps in `docs/superpowers/specs/2026-08-13-glass-chirp-alert-design.md`
+  §8.1 have not yet been run.
 - **Touch behaviour has no automated coverage and cannot get any**, per the `adb shell input`
   limitation described in [Testing](#10-testing). This is not a gap to be closed later with more
   unit tests — it structurally cannot be closed that way.

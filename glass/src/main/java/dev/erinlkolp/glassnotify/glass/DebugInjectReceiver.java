@@ -83,12 +83,17 @@ public final class DebugInjectReceiver extends BroadcastReceiver {
     /** Runs the same interrupt path the real link service uses. */
     private void notifyUi(final Context context, final Snapshot previous, final Snapshot next) {
         final InterruptOverlay overlay = GlassNotify.overlay(context);
+        final ChirpPlayer chirp = GlassNotify.chirp(context);
         new Handler(Looper.getMainLooper()).post(new Runnable() {
             @Override
             public void run() {
                 NotificationItem interrupt = InterruptPolicy.selectInterrupt(previous, next);
                 if (interrupt != null) {
+                    // Card first, sound second: the interrupt must never wait
+                    // on the speaker, so nothing the chirp path does can be
+                    // allowed to hold up or block the card appearing.
                     overlay.show(interrupt);
+                    chirp.playIfNeeded(interrupt.tier);
                 }
             }
         });

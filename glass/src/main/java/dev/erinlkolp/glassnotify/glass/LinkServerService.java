@@ -344,7 +344,11 @@ public final class LinkServerService extends Service implements BatteryWatcher.L
                 dev.erinlkolp.glassnotify.wire.NotificationItem interrupt =
                         InterruptPolicy.selectInterrupt(previous, snapshot);
                 if (interrupt != null) {
+                    // Card first, sound second: the interrupt must never wait
+                    // on the speaker, so nothing the chirp path does can be
+                    // allowed to hold up or block the card appearing.
                     overlay.show(interrupt);
+                    GlassNotify.chirp(LinkServerService.this).playIfNeeded(interrupt.tier);
                 }
             }
         });
