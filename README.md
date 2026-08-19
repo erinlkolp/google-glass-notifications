@@ -1,6 +1,6 @@
 # Glass Notifications
 
-Two Android apps that put notifications from a carried Android phone onto Google Glass Explorer
+Two Android apps that put notifications from an Android phone onto Google Glass Explorer
 Edition over classic Bluetooth RFCOMM. This README is written to stand alone: it should be enough
 to rebuild, reflash, and debug the project without opening the design spec or the implementation
 plan. Those documents still exist for historical reasoning (`docs/superpowers/specs/2026-08-04-glass-notifications-design.md`
@@ -11,19 +11,22 @@ add something this file does not repeat.
 
 ## 1. What it is, and what it is not
 
-This mirrors a **second, carried Android phone** onto Glass. It is not an iPhone bridge, and it
-will never become one — see [section 2](#2-why-not-the-iphone) for the measured reason why. The
-phone (an LG V30 with no SIM) rides in a bag or pocket, signed into the same cross-platform
-accounts as everything else: Signal, Discord, Slack, Gmail, and similar. Its notifications are
-filtered and tiered on the phone, then pushed to Glass, which displays them and nothing else.
+This mirrors an **Android phone** onto Glass. It is not an iPhone bridge, and it will never become
+one — see [section 2](#2-why-not-the-iphone) for the measured reason why. The phone's notifications
+are filtered and tiered on the phone, then pushed to Glass, which displays them and nothing else.
+
+The project was originally built against a *carried relay* phone — an Android handset with no SIM,
+riding in a bag, signed into the same cross-platform accounts as everything else. It now runs on a
+**primary** phone instead, which changes what shows up rather than how any of it works. See
+[section 8.1](#81-moving-to-a-different-phone) for what differs.
 
 Concretely:
 
-- **Will appear on Glass:** anything the V30 receives a system notification for and that is
+- **Will appear on Glass:** anything the phone receives a system notification for and that is
   allowlisted — Signal messages, Discord pings, Slack DMs, calendar reminders, and so on.
 - **Will never appear:** iMessage. iOS does not let any accessory read it, on any hardware.
-- **Will only appear if a SIM is later added to the V30:** SMS and phone calls. Today the V30 has
-  no SIM, so neither exists to forward.
+- **SMS and phone calls appear when the phone has a SIM.** On the original relay phone there was no
+  SIM, so neither existed to forward; on a primary phone both do.
 - **Glass is read-only.** It displays and scrolls a queue. It never dismisses, replies to, or acts
   on a notification. The one thing it does send back is its own battery state, so the phone can tell
   you when Glass has finished charging — see [section 5](#5-how-the-protocol-works).
@@ -83,14 +86,23 @@ Both devices were physically measured, not assumed. Treat this table as ground t
 in the spec or plan if they ever disagree — this file is the one to update after any hardware
 change.
 
-| | Glass | LG V30 |
+**The phone's adb serial and Bluetooth MAC are deliberately not recorded here.** This repository is
+public, and both are stable device identifiers. Substitute your own; `$PHONE` below stands for the
+serial `adb devices` reports. Glass's values are kept because the generated-address behaviour
+described immediately below is a property of the ROM that the recovery steps depend on.
+
+| | Glass | Phone |
 |---|---|---|
-| adb serial | `0123456789ABCDEF` | `VS9967edd915b` |
-| Bluetooth MAC | `22:22:41:C5:E5:67` | `10:F1:F2:EE:90:8F` |
-| Bluetooth name | `Glass 1` | `V30` |
-| Android / API | Community AOSP 5.1.1 (build `LMY49J`), **API 22** | Android 9 (Pie, build `PKQ1.190414.001`), **API 28** |
+| adb serial | `0123456789ABCDEF` | `$PHONE` (see above) |
+| Bluetooth MAC | `22:22:41:C5:E5:67` | not recorded (see above) |
+| Bluetooth name | `Glass 1` | whatever the phone reports |
+| Android / API | Community AOSP 5.1.1 (build `LMY49J`), **API 22** | Android 17, **API 37** |
 | Role | RFCOMM **server**, display only | RFCOMM **client**, owns reconnection |
-| Display | 640×360 physical, density 240 → **320×180 dp** | (not relevant — carried, screen off) |
+| Display | 640×360 physical, density 240 → **320×180 dp** | (not relevant — screen off in use) |
+
+The phone column was last verified on 2026-08-18 against a Pixel 11 running Android 17 (API 37).
+The project was originally developed against an LG V30 on Android 9 (API 28); anything below that
+is untested, and `minSdk` is 26.
 
 **Glass's Bluetooth MAC is generated, not the factory address, and this matters operationally.**
 `ro.bt.bdaddr_path` on this ROM points at `/data/misc/bluedroid/bdaddr`, which does not exist, so
@@ -102,10 +114,10 @@ never will be under this ROM.
 Because it lives in a `persist.*` property (written to `/data/property/`), the address is stable
 across ordinary reboots. **A `/data` wipe or a ROM reflash regenerates it.** When that happens:
 
-- The existing Bluetooth *bond* between Glass and the V30 breaks (the OS-level pairing is keyed to
+- The existing Bluetooth *bond* between Glass and the phone breaks (the OS-level pairing is keyed to
   the old address) and must be redone from [section 8](#8-first-run-setup) step 1.
 - Glass's own trust-on-first-use pin (`PeerPin`, [section 12](#12-recovery)) still holds the *old*
-  V30 address as "the peer," which no longer matters once the bond is gone, but the pin should be
+  phone address as "the peer," which no longer matters once the bond is gone, but the pin should be
   cleared anyway as part of the same recovery so a stale entry is never sitting around.
 
 Design detail: spec §5.1.
@@ -140,7 +152,7 @@ makes this an enforced test rather than a convention someone can forget.
 
 ### `phone`
 
-Everything that requires judgment happens here, because the V30 has a screen to configure it on and
+Everything that requires judgment happens here, because the phone has a screen to configure it on and
 Glass does not. `NotifyListenerService` observes the system's notification stream; `SnapshotBuilder`
 (pure logic, no Android types) filters against the allowlist, assigns each notification a tier,
 truncates fields to the wire limits, sorts, and caps at 20 items; `LinkClientService` is a
@@ -256,18 +268,22 @@ Design detail: spec §6–7.
   ```
   `compileSdk = 34` for both app modules; `platform-tools` (for `adb`) must be on `PATH` or
   referenced by full path.
-- **udev, if the V30 is not recognised over USB on a fresh machine.** The stock Android udev rules
-  file (`/etc/udev/rules.d/51-android.rules`) matches only Google's USB vendor ID `18d1` — LG's
-  vendor ID is **`1004`**, and is not covered by that file. On the machine this project was built
-  on, no custom rule was actually needed: the LG device node came up owned `root:plugdev` with a
-  `uaccess` ACL from a systemd default, and `adb` connected without any udev change. If a different
-  machine's `adb devices` cannot see the V30 at all (not even as `unauthorized`), add a rule for
-  vendor `1004`:
+- **udev, if the phone is not recognised over USB on a fresh machine.** The stock Android udev rules
+  file (`/etc/udev/rules.d/51-android.rules`) matches only Google's USB vendor ID `18d1`. A Google
+  phone is therefore covered out of the box; other manufacturers are not. The original LG V30 used
+  vendor ID **`1004`**, and on the machine this project was built on no custom rule was actually
+  needed even then — the device node came up owned `root:plugdev` with a `uaccess` ACL from a
+  systemd default, and `adb` connected without any udev change. If a different machine's
+  `adb devices` cannot see the phone at all (not even as `unauthorized`), add a rule for its vendor
+  ID, e.g. for LG's `1004`:
   ```bash
   echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="1004", MODE="0664", GROUP="plugdev", TAG+="uaccess"' \
     | sudo tee /etc/udev/rules.d/52-lg.rules
   sudo udevadm control --reload-rules && sudo udevadm trigger
   ```
+  Note that a phone can enumerate over USB while still exposing **no ADB interface at all** — a
+  Pixel with USB debugging off appears as `18d1:4ee5` (PTP) and never shows in `adb devices`. That
+  is not a udev problem; see the troubleshooting table.
   This is a *different* failure mode from the phone showing up but `unauthorized` — see the
   troubleshooting table for that case, which is about USB debugging, not udev.
 
@@ -286,13 +302,13 @@ From the repo root:
 ```
 
 `./gradlew :glass:installDebug` / `:phone:installDebug` exist and work when exactly **one** device
-is attached, but with both Glass and the V30 plugged in at once (the normal case for this project),
+is attached, but with both Glass and the phone plugged in at once (the normal case for this project),
 AGP has no reliable way to pick between them from those tasks alone. Install with `adb` directly
 instead, targeting each APK at its own serial — this is the path actually used during development:
 
 ```bash
 adb -s 0123456789ABCDEF install -r glass/build/outputs/apk/debug/glass-debug.apk
-adb -s VS9967edd915b   install -r phone/build/outputs/apk/debug/phone-debug.apk
+adb -s "$PHONE"          install -r phone/build/outputs/apk/debug/phone-debug.apk
 ```
 
 To build and run only `wire`'s tests (fast, no device needed, no AGP):
@@ -305,7 +321,7 @@ Uninstalling either app cleanly (useful before a fresh install, see [Recovery](#
 
 ```bash
 adb -s 0123456789ABCDEF shell pm uninstall dev.erinlkolp.glassnotify.glass
-adb -s VS9967edd915b   shell pm uninstall dev.erinlkolp.glassnotify.phone
+adb -s "$PHONE"          shell pm uninstall dev.erinlkolp.glassnotify.phone
 ```
 
 ---
@@ -319,11 +335,11 @@ of these fail silently in the UI.
 pairing (spec §11 — connecting to an *already-bonded* device by MAC avoids Bluetooth discovery and
 therefore avoids needing the location permission scanning would otherwise require).
 
-On the V30: **Settings → Connected devices → Bluetooth → pair with "Glass 1"**. Confirm any PIN
+On the phone: **Settings → Connected devices → Bluetooth → pair with "Glass 1"**. Confirm any PIN
 prompt on both sides. Then verify from the phone side:
 
 ```bash
-adb -s VS9967edd915b shell dumpsys bluetooth_manager | grep -iA4 "Bonded devices"
+adb -s "$PHONE" shell dumpsys bluetooth_manager | grep -iA4 "Bonded devices"
 ```
 
 Expected: `22:22:41:C5:E5:67` appears in the list.
@@ -333,7 +349,7 @@ Expected: `22:22:41:C5:E5:67` appears in the list.
 "Glass Notifications" there. Verify:
 
 ```bash
-adb -s VS9967edd915b shell settings get secure enabled_notification_listeners
+adb -s "$PHONE" shell settings get secure enabled_notification_listeners
 ```
 
 Expected: the colon-separated output contains
@@ -343,7 +359,7 @@ Expected: the colon-separated output contains
 the background." Without this, Android 9's Doze/App Standby will suspend the link overnight. Verify:
 
 ```bash
-adb -s VS9967edd915b shell dumpsys deviceidle whitelist | grep dev.erinlkolp.glassnotify.phone
+adb -s "$PHONE" shell dumpsys deviceidle whitelist | grep dev.erinlkolp.glassnotify.phone
 ```
 
 Expected: a line listing the phone app's package.
@@ -360,8 +376,8 @@ as notification access is detected — there is no separate "connect" button.
 
 ### 8.1 Moving to a different phone
 
-The steps above assume a first-time setup on the V30. Swapping in a different phone adds two
-gotchas, and **both fail silently** — nothing errors, the setup screen looks fine, and no
+The steps above assume a first-time setup on the original relay phone. Swapping in a different
+phone adds several gotchas, and **all of them fail silently** — nothing errors, the setup screen looks fine, and no
 notification ever arrives.
 
 **Gotcha 1: Glass is pinned to the old phone's MAC.**
@@ -405,25 +421,90 @@ in an overflow menu:
 
 Do this **before** attempting step 2 above, or you will conclude the app is broken.
 
-This did not exist on Android 9, so it never came up on the V30.
+This did not exist on Android 9, so it never came up on the original relay phone.
+
+There is an `adb` equivalent, which is what the verification steps below assume:
+
+```bash
+adb -s "$PHONE" shell appops set dev.erinlkolp.glassnotify.phone ACCESS_RESTRICTED_SETTINGS allow
+adb -s "$PHONE" shell appops get dev.erinlkolp.glassnotify.phone ACCESS_RESTRICTED_SETTINGS
+```
+
+**Gotcha 3: `POST_NOTIFICATIONS` is denied on a fresh install, even at `targetSdk 28`.**
+
+This one contradicts the reasonable assumption that a low `targetSdk` keeps the app on legacy
+behaviour throughout. It does for *Bluetooth* permissions. It does **not** for notifications: on
+Android 13+ a fresh install lands with
+
+```
+android.permission.POST_NOTIFICATIONS: granted=false
+```
+
+and the appop set to `ignore`. The consequences are entirely invisible rather than loud:
+
+- `LinkClientService` still runs as a foreground service and the link still works, but its ongoing
+  notification is suppressed — so the app looks like it is not running when it is.
+- The **Glass full-charge alert** (section 5, the reverse channel's only consumer) is silently
+  swallowed. That feature appears broken while the code is fine.
+
+Grant it and confirm:
+
+```bash
+adb -s "$PHONE" shell pm grant dev.erinlkolp.glassnotify.phone android.permission.POST_NOTIFICATIONS
+adb -s "$PHONE" shell dumpsys package dev.erinlkolp.glassnotify.phone | grep "POST_NOTIFICATIONS: granted"
+```
+
+Expected: `granted=true`.
+
+**Gotcha 4: `cmd notification allow_listener` silently no-ops without an explicit user id.**
+
+Granting notification access from the command line looks like it worked when it did not — the
+command returns success, prints nothing, and changes nothing:
+
+```bash
+# Does nothing. Exit status 0.
+adb -s "$PHONE" shell cmd notification allow_listener dev.erinlkolp.glassnotify.phone/dev.erinlkolp.glassnotify.phone.NotifyListenerService
+
+# Works. Note the trailing user id.
+adb -s "$PHONE" shell cmd notification allow_listener dev.erinlkolp.glassnotify.phone/dev.erinlkolp.glassnotify.phone.NotifyListenerService 0
+```
+
+Always verify against `settings get secure enabled_notification_listeners` rather than trusting the
+exit status — this is step 2's verification command and it exists for exactly this reason.
+
+**Gotcha 5: Play Protect can reject the sideload outright.**
+
+```
+adb: failed to install phone-debug.apk:
+  Failure [INSTALL_FAILED_VERIFICATION_FAILURE: Install not allowed]
+```
+
+This is Play Protect's ADB-install verifier, **not** the `targetSdk` gate — the two are easy to
+confuse because both surface at install time. Accept the prompt that appears on the phone and rerun
+the same `adb install`; it succeeds on the second attempt. There is no need to disable
+`verifier_verify_adb_installs`, and leaving that setting alone is preferable on a primary phone.
 
 **Full migration order**
 
-1. Sideload `phone-debug.apk` (allow installs from unknown sources)
+1. Sideload `phone-debug.apk` (allow installs from unknown sources) — gotcha 5 if it is rejected
 2. **Allow restricted settings** on the app — gotcha 2
-3. Grant notification access (step 2 above)
+3. Grant notification access (step 2 above) — gotcha 4 if granting over `adb`
 4. Grant the battery exemption (step 3 above)
-5. Pair the new phone with Glass (step 1 above)
-6. **Clear Glass's pin and relaunch the Glass app** — gotcha 1
-7. Configure the allowlist (step 4 above)
-8. Test with something you can trigger on demand
+5. **Grant `POST_NOTIFICATIONS`** — gotcha 3
+6. Pair the new phone with Glass (step 1 above)
+7. **Clear Glass's pin and relaunch the Glass app** — gotcha 1
+8. Configure the allowlist (step 4 above)
+9. Test with something you can trigger on demand
+
+Note that step 8 cannot be driven from `adb`: `AllowlistActivity` is `exported="false"` deliberately,
+so `am start` on it fails. Go through `SetupActivity`, which is the launcher activity.
 
 **If the new phone is your primary rather than a carried relay**
 
 Two things change, and neither is a code change:
 
 - **SMS and calls start appearing**, because the source phone finally has your SIM. That is new
-  surface that never existed on the V30, and it probably deserves `INTERRUPT` while most other
+  surface that never existed on the SIM-less relay phone, and it probably deserves `INTERRUPT` while most other
   things do not.
 - **The allowlist matters much more.** On a relay phone it only ever saw the accounts you had
   bothered signing into, which was an accidental filter. On a primary, *everything* routes through
@@ -433,15 +514,27 @@ Two things change, and neither is a code change:
 
 **On modern Android generally**
 
-The APK should install and run untouched: `targetSdk 28` keeps it on legacy Bluetooth permission
-behaviour, so there is no runtime `BLUETOOTH_CONNECT` flow to implement, and Android 14+ only blocks
-installing apps targeting below API 23. See "Known limitations and parked items" for what breaks the
-day `targetSdk` is raised.
+`targetSdk 28` keeps the app on legacy *Bluetooth* permission behaviour, so there is still no
+runtime `BLUETOOTH_CONNECT` flow to implement. It does **not** buy a free pass on everything else —
+see gotcha 3 above, where a modern permission applies despite the low target.
 
-The real risk is not the API level, it is **OEM battery management**. Samsung and Xiaomi are far more
-aggressive at killing background services than stock Android, and Samsung keeps a separate "Sleeping
-apps" list that the battery-optimisation exemption does not cover. Motorola and Pixel are close to
-stock and generally need nothing beyond step 3.
+**The install gate is now the binding constraint, and it is one API level from closing.** Android
+enforces a minimum installable `targetSdk`, readable per device:
+
+```bash
+adb -s "$PHONE" shell getprop ro.build.version.min_supported_target_sdk
+```
+
+On Android 17 (API 37) this returns **28**, and the phone module targets exactly **28**. It installs,
+with nothing to spare. The threshold has risen with successive releases, so the next one that raises
+it again will stop the sideload working, and the fix is to raise `targetSdk` — which pulls in the
+runtime `BLUETOOTH_CONNECT` flow described in "Known limitations and parked items". Treat that as
+scheduled work, not a surprise.
+
+The other standing risk is **OEM battery management**. Samsung and Xiaomi are far more aggressive at
+killing background services than stock Android, and Samsung keeps a separate "Sleeping apps" list
+that the battery-optimisation exemption does not cover. Motorola and Pixel are close to stock and
+generally need nothing beyond step 3.
 
 ---
 
@@ -542,19 +635,21 @@ running on hardware** — see [Known limitations](#known-limitations-and-parked-
 |---|---|---|
 | **Nothing appears on Glass at all** | Most commonly: devices not bonded, notification access not granted, or the allowlist has nothing configured. | Walk through [First-run setup](#8-first-run-setup) again — each step has a verification command; find which one actually failed rather than guessing. |
 | **Interrupts appear fine while the Glass UI is awake, but with the display asleep and locked the screen wakes to the lock screen and goes straight back off, showing no card** | The overlay is rendering *underneath* the keyguard. Fixed as of `a383c3e`; if you still see it, the installed APK predates that commit. Root cause: `TYPE_SYSTEM_ALERT` sits at window layer `101000`, below `KeyguardScrim` (`131000`) and the `StatusBar` that draws the keyguard on 5.x (`151000`). Note `FLAG_SHOW_WHEN_LOCKED` does **not** fix this — it controls whether the keyguard force-*hides* a window, and here the keyguard is stacked above rather than hiding anything. | Reinstall the current Glass APK. To confirm the layering yourself: `adb -s 0123456789ABCDEF shell dumpsys window windows \| grep -E "Window #\|mBaseLayer="` while an interrupt is showing — the `glassnotify.glass` overlay should read `mBaseLayer=221000`, above the StatusBar's `151000`. |
-| **Glass shows "Not connected" (stale queue)** | No `PING` received for 30s (`SnapshotStore.STALE_AFTER_MS`). The link died and the phone hasn't reconnected yet, or Bluetooth is off on one side. | Check `adb -s VS9967edd915b shell dumpsys bluetooth_manager \| grep -iE "enabled"` on both devices. If both are on and bonded, give the phone's backoff up to 60s (`Backoff.MAX_MS`) to retry, or force it with the app's "wake" path by reopening the phone app. |
+| **Glass shows "Not connected" (stale queue)** | No `PING` received for 30s (`SnapshotStore.STALE_AFTER_MS`). The link died and the phone hasn't reconnected yet, or Bluetooth is off on one side. | Check `adb -s "$PHONE" shell dumpsys bluetooth_manager \| grep -iE "enabled"` on both devices. If both are on and bonded, give the phone's backoff up to 60s (`Backoff.MAX_MS`) to retry, or force it with the app's "wake" path by reopening the phone app. |
 | **Glass shows "Phone app out of date"** | `LinkServerService` read a frame whose `version` field does not match `Protocol.VERSION` (currently `2`). This means the two APKs were built from different, incompatible commits of `wire`. | Rebuild and reinstall **both** APKs from the same checkout — `wire` is shared, but an old APK on one side does not get the new protocol automatically. |
 | **Glass refuses the connection after a reflash** | The wipe regenerated Glass's Bluetooth MAC (§3), which breaks the OS-level bond. Separately, Glass's own `PeerPin` trust-on-first-use pin may still reference the phone's old identity from before the reflash. | Re-pair the two devices from scratch (step 1 of [First-run setup](#8-first-run-setup)), then clear the pin as in [Recovery](#12-recovery) so the next connection re-pins cleanly. |
 | **The phone's persistent notification says "Connected to Glass," but nothing shows on Glass and the queue stays stale** | An **unpinned MAC is refused silently.** `LinkServerService.serve()` checks `PeerPin.isAllowed()` immediately on accept; if it fails, Glass logs `"refusing connection from unpinned device …"` and returns — closing the socket — without ever sending anything back. The phone side (`LinkClientService`) sets its "Connected" status the instant TCP-level `connect()` succeeds, **before** any data has actually been exchanged, and has no read side at all, so it can never learn the connection was rejected. | `adb -s 0123456789ABCDEF logcat -s GlassNotify` and look for "refusing connection from unpinned device." If present, clear Glass's pin (see [Recovery](#12-recovery)) and reconnect — the next connection attempt will pin the current phone address. |
-| **V30 not visible to `adb`, or stuck `unauthorized`** | This is almost always the **USB debugging toggle**, not the USB connection mode (Charging/MTP/PTP) — those are orthogonal settings on this device. Cycling the USB mode changes the advertised product ID (`62ce`, `62c1`, `62c9` were all observed) but never publishes the ADB interface if debugging is off. Watch for **USB interface class `255` / subclass `66` / protocol `1`** (the ADB interface) in `lsusb -v`, not for a specific product ID. | Confirm Developer Options → USB debugging is on. If it shows `unauthorized`, run `adb kill-server && adb start-server` **with the phone screen unlocked** (see next row) and re-check. |
-| **The RSA authorization prompt never appears on the V30** | The prompt is suppressed while the phone's screen is locked. | Unlock the phone, then `adb kill-server && adb start-server`, or simply unplug/replug the USB cable while unlocked. |
+| **Phone not visible to `adb`, or stuck `unauthorized`** | This is almost always the **USB debugging toggle**, not the USB connection mode (Charging/MTP/PTP) — those are orthogonal settings. The phone still enumerates and charges with debugging off, it just publishes no ADB interface: a Pixel in that state appears in `lsusb` as `18d1:4ee5` (PTP) and never reaches `adb devices`. On the original LG V30, cycling USB mode changed the product ID (`62ce`, `62c1`, `62c9` were all observed) but likewise never published ADB while debugging was off. Watch for **USB interface class `255` / subclass `66` / protocol `1`** (the ADB interface) in `lsusb -v`, not for a specific product ID. | Confirm Developer Options → USB debugging is on (on a new phone this means enabling Developer Options first: tap **Build number** seven times). If it shows `unauthorized`, run `adb kill-server && adb start-server` **with the phone screen unlocked** (see next row) and re-check. |
+| **The phone app shows no ongoing notification, so it looks like it is not running** | `POST_NOTIFICATIONS` is denied — the default for a fresh install on Android 13+, *including* at `targetSdk 28`. The foreground service is running normally; only its notification is suppressed. The same denial silently swallows the Glass full-charge alert. | `adb -s "$PHONE" shell dumpsys package dev.erinlkolp.glassnotify.phone \| grep "POST_NOTIFICATIONS: granted"`. If `granted=false`, see [section 8.1](#81-moving-to-a-different-phone) gotcha 3. Confirm the service itself with `adb -s "$PHONE" shell dumpsys activity services dev.erinlkolp.glassnotify.phone \| grep isForeground`. |
+| **`logcat -s GlassNotify` is empty even though notifications are arriving** | Not a fault. **There is no per-notification logging on either side.** `LinkServerService` logs only connect, disconnect, `hello`, and unknown-frame events; a snapshot being received and rendered produces no log line at all. An empty log is therefore not evidence of a delivery failure. | Check delivery by artifact instead: `adb -s 0123456789ABCDEF shell run-as dev.erinlkolp.glassnotify.glass ls -la /data/data/dev.erinlkolp.glassnotify.glass/files/snapshot.bin` — the mtime advances every time a snapshot is applied. |
+| **The RSA authorization prompt never appears on the phone** | The prompt is suppressed while the phone's screen is locked. | Unlock the phone, then `adb kill-server && adb start-server`, or simply unplug/replug the USB cable while unlocked. |
 
 Every filter above assumes the `GlassNotify` logcat tag, which every relevant class on both sides
 uses:
 
 ```bash
 adb -s 0123456789ABCDEF logcat -s GlassNotify   # Glass side
-adb -s VS9967edd915b   logcat -s GlassNotify   # phone side
+adb -s "$PHONE"          logcat -s GlassNotify   # phone side
 ```
 
 ---
@@ -652,7 +747,8 @@ against both devices during hardware verification on 2026-08-10 (see the row bel
 Stated plainly so nothing above is mistaken for more settled than it is:
 
 - **Hardware verification was completed on 2026-08-10**, against both devices (Glass Explorer
-  Edition and the LG V30). All 162 unit tests pass and both APKs build cleanly. The RFCOMM
+  Edition and the LG V30 that preceded the current phone). All 162 unit tests pass and both APKs
+  build cleanly. The RFCOMM
   concurrency (single-writer socket handling in `LinkClientService`, the accept-loop lifecycle in
   `LinkServerService`, the connect/destroy race handling, and the new `GLASS_STATE` reverse channel)
   was exercised by running the two devices against each other, not only by code review.
