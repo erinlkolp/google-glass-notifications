@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Only the -v26 adaptive form is provided, with no legacy PNG fallback. That is
+  safe here specifically because the phone module is minSdk 26, so every device
+  that can install this app can render an adaptive icon. Do not copy this into
+  the glass module, which is API 22.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>
