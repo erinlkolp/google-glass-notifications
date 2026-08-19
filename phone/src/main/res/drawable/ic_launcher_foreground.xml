@@ -1,0 +1,20 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!--
+      Google Glass, head on: an empty left lens and a solid right one. The
+      asymmetry is the point - the prism sits over the right eye only, so a
+      symmetric pair of spectacles would be the wrong device.
+
+      All geometry stays inside a radius-33 circle centred on (54,54). An
+      adaptive icon's outer 18dp is decorative bleed that any launcher may mask
+      away, and several mask to a circle, so anything outside that radius is
+      not guaranteed to survive.
+    -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M25,44 h24 v20 h-24 z M30,49 h14 v10 h-14 z M49,51 h10 v5 h-10 z M59,44 h24 v20 h-24 z" />
+</vector>
